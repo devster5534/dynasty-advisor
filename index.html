@@ -1518,7 +1518,9 @@ function findClearRosterTrades(analysis, expanded = false) {
     for (let i = 0; i < Math.min(myAtPos.length - 1, expanded ? 7 : 5); i++) {
       for (let j = i + 1; j < Math.min(myAtPos.length, expanded ? 8 : 6); j++) {
         const g1 = myAtPos[i], g2 = myAtPos[j];
-        if (!hasViableDepthAfterTrade(myTeam, pos, [g1.id, g2.id], posAvg)) continue;
+        // Clear trades intentionally thin a position — just need enough players left to cover starters
+        const afterTrade = myAtPos.filter(x => x.id !== g1.id && x.id !== g2.id);
+        if (afterTrade.length < starterCount(pos)) continue;
         const giveVal = g1.v + g2.v;
 
         for (const other of teams) {
