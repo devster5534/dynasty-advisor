@@ -1510,16 +1510,21 @@ function findClearRosterTrades(analysis, expanded = false) {
   const seen      = new Set();
 
   for (const pos of ['RB', 'WR', 'TE', 'QB']) {
-    // Any position where I have 3+ players with meaningful value is a candidate
-    const myAtPos = (myTeam.byPos[pos] || []).filter(x => x.v > 50);
-    if (myAtPos.length < 3) continue;
+    // Sort by value desc so indices 0..protect-1 are clearly the starters
+    const myAtPos = (myTeam.byPos[pos] || []).filter(x => x.v > 50).sort((a, b) => b.v - a.v);
+    // Protect at least the top 2 players OR the explicit starter count, whichever is higher —
+    // this accounts for FLEX spots that routinely use RB/WR even when only 1 slot is explicit
+    const protectCount = Math.max(starterCount(pos), 2);
+    // Only trade depth players — never offer a starting-caliber player in a clear trade
+    const tradeable = myAtPos.slice(protectCount);
+    if (tradeable.length < 2) continue;
 
-    for (let i = 0; i < Math.min(myAtPos.length - 1, expanded ? 7 : 5); i++) {
-      for (let j = i + 1; j < Math.min(myAtPos.length, expanded ? 8 : 6); j++) {
-        const g1 = myAtPos[i], g2 = myAtPos[j];
-        // Must keep at least enough to cover starters after the trade
+    for (let i = 0; i < Math.min(tradeable.length - 1, expanded ? 6 : 4); i++) {
+      for (let j = i + 1; j < Math.min(tradeable.length, expanded ? 7 : 5); j++) {
+        const g1 = tradeable[i], g2 = tradeable[j];
+        // Still verify enough non-traded players remain to cover starters+1 (accounts for FLEX)
         const afterTrade = myAtPos.filter(x => x.id !== g1.id && x.id !== g2.id);
-        if (afterTrade.length < starterCount(pos)) continue;
+        if (afterTrade.length < protectCount) continue;
         const giveVal = g1.v + g2.v;
 
         for (const other of teams) {
