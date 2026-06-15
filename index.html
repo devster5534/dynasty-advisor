@@ -466,8 +466,9 @@ const CACHE = {
 };
 
 const DP_URL = 'https://raw.githubusercontent.com/dynastyprocess/data/master/files/values-players.csv';
-let G_tradeProfiles = {};
-let G_teamPicks     = {};
+let G_tradeProfiles  = {};
+let G_teamPicks      = {};
+let G_posTradeFreq   = { QB:0, RB:0, WR:0, TE:0, total:0 };
 
 function savedRosterKey(leagueId)  { return 'da_roster_'  + leagueId; }
 function savedLeagueKey()          { return 'da_league_v1'; }
@@ -746,9 +747,10 @@ async function doLoadLeague(league) {
 
     S.hasValues = Object.keys(S.values).length > 0;
 
-    // Build trade profiles and pick inventory
+    // Build trade profiles, pick inventory, and position trade frequency
     G_tradeProfiles = buildTradeProfiles(transactions || []);
     G_teamPicks     = buildPickInventory(rosters || [], tradedPicks || [], SEASON);
+    G_posTradeFreq  = buildPosTradeFreq(transactions || []);
 
     // Use saved team choice if we have one for this specific league
     const savedRosterId = getSavedRoster(league.league_id);
@@ -890,6 +892,25 @@ function buildTradeProfiles(transactions) {
     }
   }
   return profiles;
+}
+
+function buildPosTradeFreq(transactions) {
+  const freq = { QB: 0, RB: 0, WR: 0, TE: 0, total: 0 };
+  for (const txn of transactions) {
+    if (txn.type !== 'trade') continue;
+    for (const pid of Object.keys(txn.adds || {})) {
+      const pos = (S.players[String(pid)] || {}).position;
+      if (freq[pos] !== undefined) { freq[pos]++; freq.total++; }
+    }
+  }
+  return freq;
+}
+
+// A position is "rarely traded" if it appears in fewer than 8% of traded players league-wide.
+// Requires at least 10 total player trades to make the call — otherwise assume all positions tradeable.
+function isRarelyTraded(pos) {
+  if (G_posTradeFreq.total < 10) return false;
+  return (G_posTradeFreq[pos] || 0) / G_posTradeFreq.total < 0.08;
 }
 
 function tradeProfileLabel(profile) {
@@ -1071,63 +1092,59 @@ function findTrades(analysis, traj) {
   const { teams, posAvg, myTeam } = analysis;
   if (!myTeam) return [];
 
-  // Use ratio (my value / league avg) so trades always generate even if below avg everywhere
-  const myRatio = pos => positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
-  const posByRatio = ['QB','RB','WR','TE'].sort((a, b) => myRatio(b) - myRatio(a));
-  const myStrengths = posByRatio.slice(0, 2); // top 2 relative positions
-  const myNeeds     = posByRatio.slice(2);    // bottom 2 relative positions
-
-  console.log('[DA] findTrades | hasValues:', S.hasValues, '| valuesCount:', Object.keys(S.values).length);
-  console.log('[DA] posAvg:', JSON.stringify(posAvg));
-  console.log('[DA] myRatios:', Object.fromEntries(['QB','RB','WR','TE'].map(p => [p, myRatio(p).toFixed(2)])));
-  console.log('[DA] myStrengths:', myStrengths, '| myNeeds:', myNeeds);
+  const myRatio  = pos => positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
+  const TRADEABLE = ['QB','RB','WR','TE'].filter(p => !isRarelyTraded(p));
 
   const proposals = [];
   const seen = new Set();
 
-  for (const other of teams) {
-    if (other.isMe) continue;
-    const theirRatio = pos => positionTotal(other.byPos[pos] || []) / Math.max(posAvg[pos], 1);
-    for (const needPos of myNeeds) {
-      for (const strengthPos of myStrengths) {
-        // They're relatively strong where I need help, and weaker where I'm relatively stronger
-        if (!( theirRatio(needPos) > theirRatio(strengthPos) )) continue;
+  // Consider all valid (givePos → needPos) combos where I'm relatively stronger at givePos
+  for (const givePos of TRADEABLE) {
+    for (const needPos of TRADEABLE) {
+      if (givePos === needPos) continue;
+      if (myRatio(givePos) <= myRatio(needPos)) continue; // only trade from relative strength
 
-        const myGive   = (myTeam.byPos[strengthPos] || []).filter(x => x.v > 100);
-        const theyHave = (other.byPos[needPos]       || []).filter(x => x.v > 100);
+      for (const other of teams) {
+        if (other.isMe) continue;
+        const theirRatio = pos => positionTotal(other.byPos[pos] || []) / Math.max(posAvg[pos], 1);
+        // They should be relatively stronger where I need help
+        if (theirRatio(needPos) <= theirRatio(givePos)) continue;
+
+        const myGive   = (myTeam.byPos[givePos] || []).filter(x => x.v > 100);
+        const theyHave = (other.byPos[needPos]   || []).filter(x => x.v > 100);
         if (!myGive.length || !theyHave.length) continue;
 
-        // 1:1 swaps — check viable depth per specific player being traded
-        for (const g of myGive.slice(0, 5)) {
-          if (!hasViableDepthAfterTrade(myTeam, strengthPos, [g.id], posAvg)) continue;
-          for (const r of theyHave.slice(0, 5)) {
+        // 1:1 swaps — depth check per specific player
+        for (const g of myGive.slice(0, 8)) {
+          if (!hasViableDepthAfterTrade(myTeam, givePos, [g.id], posAvg)) continue;
+          for (const r of theyHave.slice(0, 8)) {
             if (!hasViableDepthAfterTrade(other, needPos, [r.id], posAvg)) continue;
             const diff = r.v - g.v;
             const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
             const key  = [g.id, r.id].sort().join('|');
             if (!seen.has(key)) {
               seen.add(key);
-              proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct, traj });
+              proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos, recvPos: needPos, diff, pct, traj });
             }
           }
         }
 
-        // 2:1 — I give 2, I receive 1 (to get an upgrade)
-        for (const r of theyHave.slice(0, 3)) {
+        // 2:1 — I give 2, receive 1 upgrade
+        for (const r of theyHave.slice(0, 5)) {
           if (r.v < 500) continue;
           if (!hasViableDepthAfterTrade(other, needPos, [r.id], posAvg)) continue;
-          for (let i = 0; i < Math.min(myGive.length - 1, 4); i++) {
-            for (let j = i + 1; j < Math.min(myGive.length, 5); j++) {
+          for (let i = 0; i < Math.min(myGive.length - 1, 5); i++) {
+            for (let j = i + 1; j < Math.min(myGive.length, 6); j++) {
               const g1 = myGive[i], g2 = myGive[j];
-              if (!hasViableDepthAfterTrade(myTeam, strengthPos, [g1.id, g2.id], posAvg)) continue;
+              if (!hasViableDepthAfterTrade(myTeam, givePos, [g1.id, g2.id], posAvg)) continue;
               const gv   = g1.v + g2.v;
               const diff = r.v - gv;
               const pct  = Math.abs(diff) / Math.max(gv, r.v, 1);
-              if (pct <= 0.25) {
+              if (pct <= 0.30) {
                 const key = [g1.id, g2.id, r.id].sort().join('|');
                 if (!seen.has(key)) {
                   seen.add(key);
-                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct, traj });
+                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos, recvPos: needPos, diff, pct, traj });
                 }
               }
             }
@@ -1137,17 +1154,83 @@ function findTrades(analysis, traj) {
     }
   }
 
-  console.log('[DA] proposals before filter:', proposals.length);
-
-  // Per (partner, givePos, recvPos) keep only the best match; then sort by closeness, cap at 8
-  const best = new Map();
+  // Keep top 2 per (partner, givePos, recvPos, trade type) group, cap at 24
+  const grouped = new Map();
   for (const p of proposals) {
     const gk = `${p.partnerId}|${p.givePos}|${p.recvPos}|${p.give.length}`;
-    if (!best.has(gk) || p.pct < best.get(gk).pct) best.set(gk, p);
+    if (!grouped.has(gk)) grouped.set(gk, []);
+    grouped.get(gk).push(p);
   }
-  return [...best.values()]
-    .sort((a, b) => a.pct - b.pct)
-    .slice(0, 8);
+  const out = [];
+  for (const group of grouped.values()) {
+    group.sort((a, b) => a.pct - b.pct);
+    out.push(...group.slice(0, 2));
+  }
+  return out.sort((a, b) => a.pct - b.pct).slice(0, 24);
+}
+
+// Generates proposals where I send a player and receive a future pick
+function findPickTrades(analysis) {
+  const { teams, posAvg, myTeam } = analysis;
+  if (!myTeam) return [];
+
+  const TRADEABLE    = ['QB','RB','WR','TE'].filter(p => !isRarelyTraded(p));
+  const futureSeason = s => parseInt(s) > parseInt(SEASON);
+  const proposals    = [];
+  const seen         = new Set();
+
+  // Players I could sell: any tradeable position, value > 400
+  const sellPool = TRADEABLE.flatMap(pos =>
+    (myTeam.byPos[pos] || []).filter(x => x.v > 400).slice(0, 5).map(x => ({ ...x, givePos: pos }))
+  ).sort((a, b) => b.v - a.v).slice(0, 10);
+
+  for (const player of sellPool) {
+    if (!hasViableDepthAfterTrade(myTeam, player.givePos, [player.id], posAvg)) continue;
+
+    for (const other of teams) {
+      if (other.isMe) continue;
+      const theirRatioAtPos = positionTotal(other.byPos[player.givePos] || []) / Math.max(posAvg[player.givePos], 1);
+      // Only offer the player to teams that actually need that position (below 100% avg)
+      if (theirRatioAtPos >= 1.05) continue;
+
+      const theirPicks = (G_teamPicks[other.rosterId] || [])
+        .filter(pk => futureSeason(pk.season) && pk.value > 200)
+        .sort((a, b) => b.value - a.value);
+
+      for (const pick of theirPicks.slice(0, 3)) {
+        const diff = pick.value - player.v;
+        const pct  = Math.abs(diff) / Math.max(pick.value, player.v, 1);
+        const key  = `pick|${player.id}|${pick.season}|${pick.round}|${other.rosterId}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          const ordinal = n => ['','1st','2nd','3rd','4th','5th'][n] || n+'th';
+          const pickObj = {
+            id: key,
+            p: { position: 'PICK' },
+            v: pick.value,
+            isPick: true,
+            pickLabel: `${ordinal(pick.round)}-Round ${pick.season}`,
+            isOwn: pick.isOwn,
+            origOwner: pick.isOwn ? other.ownerName : null,
+          };
+          proposals.push({
+            partner: other.ownerName,
+            partnerId: other.rosterId,
+            give: [player],
+            recv: [pickObj],
+            givePos: player.givePos,
+            recvPos: 'PICK',
+            diff,
+            pct,
+            isPickTrade: true,
+            theirNeedRatio: (theirRatioAtPos * 100).toFixed(0),
+          });
+        }
+      }
+    }
+  }
+
+  return proposals.sort((a, b) => a.pct - b.pct).slice(0, 12);
 }
 
 // ---- Trajectory ----
@@ -1244,7 +1327,9 @@ function renderDashboard() {
   const total  = teams.length;
   const grade  = gradeFromRank(rank, total);
   const traj   = trajectory(myTeam, posAvg);
-  const trades = findTrades(analysis, traj);
+  const trades     = findTrades(analysis, traj);
+  const pickTrades = findPickTrades(analysis);
+  const allTrades  = [...trades, ...pickTrades];
 
   // Overview
   const leagueAvgVal = teams.reduce((s, t) => s + t.totalVal, 0) / total;
@@ -1279,8 +1364,8 @@ function renderDashboard() {
   renderRoster(myTeam);
   renderBars(myTeam, posAvg);
   renderDraftPicks();
-  renderTrades(trades, traj);
-  renderPath(myTeam, posAvg, trades, traj);
+  renderTrades(allTrades, traj);
+  renderPath(myTeam, posAvg, allTrades, traj);
 }
 
 function renderRoster(myTeam) {
@@ -1365,14 +1450,12 @@ function renderDraftPicks() {
 }
 
 function classifyTrade(t, posAvg) {
+  if (t.isPickTrade) return 'young';
   const recvMaxVal = Math.max(...t.recv.map(x => x.v));
   const recvAvgAge = t.recv.map(x => x.p.age || 26).reduce((s, a) => s + a, 0) / t.recv.length;
   const giveAvgAge = t.give.map(x => x.p.age || 26).reduce((s, a) => s + a, 0) / t.give.length;
-  // "Top asset" = received player is worth ≥25% of league avg total for that position
   if (recvMaxVal >= posAvg[t.recvPos] * 0.25) return 'top';
-  // "Young value" = getting someone under 25 (with real value already filtered upstream)
   if (recvAvgAge < 25) return 'young';
-  // "Add vets" = getting someone 28+
   if (recvAvgAge >= 28 || (recvAvgAge >= 27 && giveAvgAge < recvAvgAge)) return 'vet';
   return 'depth';
 }
@@ -1411,6 +1494,13 @@ function renderTradeCard(t, teams, posAvg, traj) {
   }
 
   const playerCard = (x, pos) => {
+    if (x.isPick) {
+      return `<div class="trade-player">
+        <div class="tp-name">${x.pickLabel}</div>
+        <div class="tp-meta">Draft Pick · ${x.isOwn ? 'Their own' : 'Via trade'}</div>
+        <div class="tp-val">~${x.v.toLocaleString()} pts est.</div>
+      </div>`;
+    }
     const src = playerValSources(x.id);
     return `<div class="trade-player">
       <div class="tp-name">${pname(x.p)}</div>
@@ -1423,6 +1513,16 @@ function renderTradeCard(t, teams, posAvg, traj) {
   const giveSide  = t.give.map(x => playerCard(x, t.givePos)).join('');
   const recvSide  = t.recv.map(x => playerCard(x, t.recvPos)).join('');
   const alignNote = tradeAlignmentNote(t, traj);
+
+  // Override reasoning for pick trades
+  let finalYouWhy = youAcceptWhy;
+  let finalTheyWhy = theyAcceptWhy;
+  if (t.isPickTrade) {
+    const givePlayer = t.give[0];
+    const pick = t.recv[0];
+    finalYouWhy = `Converting ${pname(givePlayer.p)} (${givePlayer.v.toLocaleString()} pts) into a future pick is a rebuild move — you bank an asset that could become anything, and free up a roster spot. Net value: ${diff >= 0 ? '+' : ''}${diff.toLocaleString()} pts.`;
+    finalTheyWhy = `${t.partner} is at ${t.theirNeedRatio}% of league avg at ${t.givePos} and needs the upgrade. They're paying with draft capital they can afford, getting a proven player now.`;
+  }
 
   return `<div class="trade-card">
     <div class="trade-hdr">
@@ -1443,8 +1543,8 @@ function renderTradeCard(t, teams, posAvg, traj) {
         ${recvSide}
       </div>
     </div>
-    <div class="trade-why"><strong>Why you accept:</strong> ${youAcceptWhy}${alignNote ? ' ' + alignNote : ''}</div>
-    <div class="trade-why" style="margin-top:6px;"><strong>Why they accept:</strong> ${theyAcceptWhy}</div>
+    <div class="trade-why"><strong>Why you accept:</strong> ${finalYouWhy}${alignNote ? ' ' + alignNote : ''}</div>
+    <div class="trade-why" style="margin-top:6px;"><strong>Why they accept:</strong> ${finalTheyWhy}</div>
   </div>`;
 }
 
