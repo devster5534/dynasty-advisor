@@ -247,9 +247,10 @@
       padding: 8px 10px; margin-bottom: 5px;
     }
     .trade-player:last-child { margin-bottom: 0; }
-    .tp-name { font-weight: 600; font-size: 13px; }
-    .tp-meta { font-size: 11px; color: var(--muted); margin-top: 1px; }
-    .tp-val  { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .tp-name    { font-weight: 600; font-size: 13px; }
+    .tp-meta    { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .tp-val     { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .tp-sources { font-size: 10px; color: var(--accent); margin-top: 2px; letter-spacing: 0.2px; }
     .trade-arrow { text-align: center; color: var(--muted); font-size: 20px; padding-top: 22px; }
     .trade-why {
       font-size: 12px; color: var(--muted);
@@ -462,6 +463,8 @@ const S = {
   users:    [],
   players:  {},
   values:   {},
+  fcValues: {},
+  dpValues: {},
   hasValues: false,
   myRosterId: null,
 };
@@ -600,9 +603,13 @@ function buildNameToIdMap() {
 
 function mergeDPValues(dpMap, nameMap) {
   let added = 0;
+  S.dpValues = {};
   for (const [n, v] of Object.entries(dpMap)) {
     const id = nameMap[n];
-    if (id && !S.values[id] && v > 0) { S.values[id] = v; added++; }
+    if (id && v > 0) {
+      S.dpValues[id] = v;
+      if (!S.values[id]) { S.values[id] = v; added++; }
+    }
   }
   return added;
 }
@@ -610,11 +617,12 @@ function mergeDPValues(dpMap, nameMap) {
 function buildValuesMap(fcData) {
   if (!fcData) return {};
   const map = {};
+  S.fcValues = {};
   for (const entry of fcData) {
     const p  = entry.player;
     const v  = entry.value || 0;
     const id = p && (p.sleeperId || p.maybeSleeperId || p.sleeperBotId);
-    if (id) map[String(id)] = v;
+    if (id) { map[String(id)] = v; S.fcValues[String(id)] = v; }
   }
   return map;
 }
@@ -926,6 +934,13 @@ function ownerName(rosterId) {
 // ---- Analysis ----
 function playerVal(id) { return S.values[String(id)] || 0; }
 function playerInfo(id) { return S.players[String(id)] || {}; }
+function playerValSources(id) {
+  const sid = String(id);
+  const parts = [];
+  if (S.fcValues[sid] > 0) parts.push(`FantasyCalc: ${S.fcValues[sid].toLocaleString()}`);
+  if (S.dpValues[sid] > 0) parts.push(`Consensus: ${S.dpValues[sid].toLocaleString()}`);
+  return parts.join(' · ');
+}
 
 function positionTotal(arr) { return arr.reduce((s, p) => s + p.v, 0); }
 
@@ -983,6 +998,37 @@ function analyzeAll() {
 }
 
 // ---- Trade engine ----
+function minRemainingDepth(pos) {
+  const positions = (S.league && S.league.roster_positions) || [];
+  const starters = positions.filter(p => p === pos).length;
+  return starters + 1; // starter count + at least 1 backup
+}
+
+function tradeAlignmentNote(trade, traj) {
+  const giveAges = trade.give.map(x => x.p.age || 0).filter(Boolean);
+  const recvAges = trade.recv.map(x => x.p.age || 0).filter(Boolean);
+  const giveAge  = giveAges.length ? giveAges.reduce((s,a) => s+a, 0) / giveAges.length : null;
+  const recvAge  = recvAges.length ? recvAges.reduce((s,a) => s+a, 0) / recvAges.length : null;
+  const cls = traj ? traj.cls : '';
+
+  if (cls === 'rebuilding') {
+    if (giveAge && giveAge > 27) return `Selling an aging player (age ${giveAge.toFixed(0)}) before value declines is the right rebuild move.`;
+    if (recvAge && giveAge && recvAge < giveAge - 1) return `Getting younger (age ${recvAge.toFixed(0)} vs ${giveAge.toFixed(0)}) — this accelerates your rebuild.`;
+    if (recvAge && recvAge < 24) return `Age ${recvAge.toFixed(0)} fits your rebuild timeline. Prioritize upside over win-now value.`;
+    return `Consider asking for a future pick to make this more rebuild-friendly.`;
+  }
+  if (cls === 'win-now') {
+    if (recvAge && recvAge >= 24 && recvAge <= 29) return `Age ${recvAge.toFixed(0)} is in their prime — fits your win-now window.`;
+    if (recvAge && recvAge > 29) return `Heads-up: age ${recvAge.toFixed(0)} may not match your full window. Confirm they still have 2+ years of elite play.`;
+    return `Prioritize proven producers. If you can send a future pick instead of a young player, do it.`;
+  }
+  if (cls === 'contending') {
+    if (recvAge && recvAge <= 27) return `Age ${recvAge.toFixed(0)} gives you prime years ahead — smart for a contending team.`;
+    return `Good fit for a team with an open window.`;
+  }
+  return '';
+}
+
 function calcSurplus(team, posAvg) {
   const out = {};
   for (const pos of ['QB','RB','WR','TE']) {
@@ -991,7 +1037,7 @@ function calcSurplus(team, posAvg) {
   return out;
 }
 
-function findTrades(analysis) {
+function findTrades(analysis, traj) {
   const { teams, posAvg, myTeam } = analysis;
   if (!myTeam) return [];
 
@@ -1022,33 +1068,42 @@ function findTrades(analysis) {
         console.log(`[DA] ${other.ownerName} | ${strengthPos}->${needPos} | myGive:${myGive.length} theyHave:${theyHave.length}`);
         if (!myGive.length || !theyHave.length) continue;
 
-        // 1:1 swaps — no value threshold, rank by closeness
-        for (const g of myGive.slice(0, 5)) {
-          for (const r of theyHave.slice(0, 5)) {
-            const diff = r.v - g.v;
-            const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
-            const key = [g.id, r.id].sort().join('|');
-            if (!seen.has(key)) {
-              seen.add(key);
-              proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct });
+        // Depth check for 1:1: both sides must retain enough players at the traded position
+        const myDepth1   = (myTeam.byPos[strengthPos] || []).length - 1;
+        const theirDepth1 = (other.byPos[needPos]     || []).length - 1;
+        const depthOk1 = myDepth1 >= minRemainingDepth(strengthPos) && theirDepth1 >= minRemainingDepth(needPos);
+
+        if (depthOk1) {
+          for (const g of myGive.slice(0, 5)) {
+            for (const r of theyHave.slice(0, 5)) {
+              const diff = r.v - g.v;
+              const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
+              const key = [g.id, r.id].sort().join('|');
+              if (!seen.has(key)) {
+                seen.add(key);
+                proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct, traj });
+              }
             }
           }
         }
 
         // 2:1 — I give 2, I receive 1 (to get an upgrade)
-        for (const r of theyHave.slice(0, 3)) {
-          if (r.v < 500) continue;
-          for (let i = 0; i < Math.min(myGive.length - 1, 4); i++) {
-            for (let j = i + 1; j < Math.min(myGive.length, 5); j++) {
-              const g1 = myGive[i], g2 = myGive[j];
-              const gv = g1.v + g2.v;
-              const diff = r.v - gv;
-              const pct  = Math.abs(diff) / Math.max(gv, r.v, 1);
-              if (pct <= 0.25) {
-                const key = [g1.id, g2.id, r.id].sort().join('|');
-                if (!seen.has(key)) {
-                  seen.add(key);
-                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct });
+        const myDepth2 = (myTeam.byPos[strengthPos] || []).length - 2;
+        if (myDepth2 >= minRemainingDepth(strengthPos) && theirDepth1 >= minRemainingDepth(needPos)) {
+          for (const r of theyHave.slice(0, 3)) {
+            if (r.v < 500) continue;
+            for (let i = 0; i < Math.min(myGive.length - 1, 4); i++) {
+              for (let j = i + 1; j < Math.min(myGive.length, 5); j++) {
+                const g1 = myGive[i], g2 = myGive[j];
+                const gv = g1.v + g2.v;
+                const diff = r.v - gv;
+                const pct  = Math.abs(diff) / Math.max(gv, r.v, 1);
+                if (pct <= 0.25) {
+                  const key = [g1.id, g2.id, r.id].sort().join('|');
+                  if (!seen.has(key)) {
+                    seen.add(key);
+                    proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct, traj });
+                  }
                 }
               }
             }
@@ -1165,7 +1220,7 @@ function renderDashboard() {
   const total  = teams.length;
   const grade  = gradeFromRank(rank, total);
   const traj   = trajectory(myTeam, posAvg);
-  const trades = findTrades(analysis);
+  const trades = findTrades(analysis, traj);
 
   // Overview
   const leagueAvgVal = teams.reduce((s, t) => s + t.totalVal, 0) / total;
@@ -1200,7 +1255,7 @@ function renderDashboard() {
   renderRoster(myTeam);
   renderBars(myTeam, posAvg);
   renderDraftPicks();
-  renderTrades(trades);
+  renderTrades(trades, traj);
   renderPath(myTeam, posAvg, trades, traj);
 }
 
@@ -1265,15 +1320,16 @@ function renderDraftPicks() {
     return r ? (userMap[r.owner_id] || 'Team ' + rid) : 'Team ' + rid;
   };
 
-  const rows = myPicks.map(pk => {
-    const suffix = ['','st','nd','rd','th','th'][pk.round] || 'th';
-    const label  = `${pk.round}${suffix} ${pk.season}`;
-    const from   = pk.isOwn ? 'Own pick' : `Via ${rosterName(pk.origRosterId)}`;
-    const cls    = pk.round === 1 ? 'first' : pk.round >= 4 ? 'late' : '';
+  const sorted = [...myPicks].sort((a, b) => a.season - b.season || a.round - b.round);
+  const ordinal = n => ['','1st','2nd','3rd','4th','5th'][n] || n + 'th';
+  const rows = sorted.map(pk => {
+    const label = `${ordinal(pk.round)} ${pk.season}`;
+    const from  = pk.isOwn ? 'Own pick' : `Via ${rosterName(pk.origRosterId)}`;
+    const cls   = pk.round === 1 ? 'first' : pk.round >= 4 ? 'late' : '';
     return `<div class="pick-row">
       <div class="pick-badge ${cls}">${label}</div>
       <div class="pick-info">
-        <div class="pick-name">${pk.round === 1 ? '1st' : pk.round === 2 ? '2nd' : pk.round === 3 ? '3rd' : pk.round + 'th'} Round · ${pk.season}</div>
+        <div class="pick-name">${ordinal(pk.round)} Round · ${pk.season}</div>
         <div class="pick-own">${from}</div>
       </div>
       <div class="pick-val">~${pk.value.toLocaleString()} pts</div>
@@ -1284,7 +1340,7 @@ function renderDraftPicks() {
   show('picksCard');
 }
 
-function renderTrades(trades) {
+function renderTrades(trades, traj) {
   if (!S.hasValues) {
     $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">Dynasty values couldn't load — click Refresh Data to try again.</p>`;
     return;
@@ -1337,17 +1393,20 @@ function renderTrades(trades) {
       else if (profile.picksReceived > profile.picksSent) theyAcceptWhy += ` They tend to receive picks in deals — a pick sweetener could seal it.`;
     }
 
-    const giveSide = t.give.map(x => `<div class="trade-player">
-      <div class="tp-name">${pname(x.p)}</div>
-      <div class="tp-meta">${x.p.maybeTeam || x.p.team || 'FA'} · ${t.givePos}${x.p.maybeAge || x.p.age ? ' · Age ' + (x.p.maybeAge || x.p.age) : ''}</div>
-      <div class="tp-val">${x.v.toLocaleString()} pts</div>
-    </div>`).join('');
+    const playerCard = (x, pos) => {
+      const src = playerValSources(x.id);
+      return `<div class="trade-player">
+        <div class="tp-name">${pname(x.p)}</div>
+        <div class="tp-meta">${x.p.maybeTeam || x.p.team || 'FA'} · ${pos}${x.p.maybeAge || x.p.age ? ' · Age ' + (x.p.maybeAge || x.p.age) : ''}</div>
+        <div class="tp-val">${x.v.toLocaleString()} pts</div>
+        ${src ? `<div class="tp-sources">${src}</div>` : ''}
+      </div>`;
+    };
 
-    const recvSide = t.recv.map(x => `<div class="trade-player">
-      <div class="tp-name">${pname(x.p)}</div>
-      <div class="tp-meta">${x.p.maybeTeam || x.p.team || 'FA'} · ${t.recvPos}${x.p.maybeAge || x.p.age ? ' · Age ' + (x.p.maybeAge || x.p.age) : ''}</div>
-      <div class="tp-val">${x.v.toLocaleString()} pts</div>
-    </div>`).join('');
+    const giveSide = t.give.map(x => playerCard(x, t.givePos)).join('');
+    const recvSide = t.recv.map(x => playerCard(x, t.recvPos)).join('');
+
+    const alignNote = tradeAlignmentNote(t, traj);
 
     return `<div class="trade-card">
       <div class="trade-hdr">
@@ -1368,7 +1427,7 @@ function renderTrades(trades) {
           ${recvSide}
         </div>
       </div>
-      <div class="trade-why"><strong>Why you accept:</strong> ${youAcceptWhy}</div>
+      <div class="trade-why"><strong>Why you accept:</strong> ${youAcceptWhy}${alignNote ? ' ' + alignNote : ''}</div>
       <div class="trade-why" style="margin-top:6px;"><strong>Why they accept:</strong> ${theyAcceptWhy}</div>
     </div>`;
   }).join('');
