@@ -998,10 +998,17 @@ function analyzeAll() {
 }
 
 // ---- Trade engine ----
-function minRemainingDepth(pos) {
+function starterCount(pos) {
   const positions = (S.league && S.league.roster_positions) || [];
-  const starters = positions.filter(p => p === pos).length;
-  return starters + 1; // starter count + at least 1 backup
+  return Math.max(positions.filter(p => p === pos).length, 1);
+}
+
+// After removing removedIds, must have ≥ starters+1 players with meaningful value.
+// "Meaningful" = value ≥ 10% of league avg for that position (filters out pure filler).
+function hasViableDepthAfterTrade(team, pos, removedIds, posAvg) {
+  const floor = Math.max(posAvg[pos] * 0.10, 150);
+  const remaining = (team.byPos[pos] || []).filter(x => !removedIds.includes(x.id) && x.v >= floor);
+  return remaining.length >= starterCount(pos) + 1;
 }
 
 function tradeAlignmentNote(trade, traj) {
@@ -1065,45 +1072,39 @@ function findTrades(analysis, traj) {
 
         const myGive   = (myTeam.byPos[strengthPos] || []).filter(x => x.v > 100);
         const theyHave = (other.byPos[needPos]       || []).filter(x => x.v > 100);
-        console.log(`[DA] ${other.ownerName} | ${strengthPos}->${needPos} | myGive:${myGive.length} theyHave:${theyHave.length}`);
         if (!myGive.length || !theyHave.length) continue;
 
-        // Depth check for 1:1: both sides must retain enough players at the traded position
-        const myDepth1   = (myTeam.byPos[strengthPos] || []).length - 1;
-        const theirDepth1 = (other.byPos[needPos]     || []).length - 1;
-        const depthOk1 = myDepth1 >= minRemainingDepth(strengthPos) && theirDepth1 >= minRemainingDepth(needPos);
-
-        if (depthOk1) {
-          for (const g of myGive.slice(0, 5)) {
-            for (const r of theyHave.slice(0, 5)) {
-              const diff = r.v - g.v;
-              const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
-              const key = [g.id, r.id].sort().join('|');
-              if (!seen.has(key)) {
-                seen.add(key);
-                proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct, traj });
-              }
+        // 1:1 swaps — check viable depth per specific player being traded
+        for (const g of myGive.slice(0, 5)) {
+          if (!hasViableDepthAfterTrade(myTeam, strengthPos, [g.id], posAvg)) continue;
+          for (const r of theyHave.slice(0, 5)) {
+            if (!hasViableDepthAfterTrade(other, needPos, [r.id], posAvg)) continue;
+            const diff = r.v - g.v;
+            const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
+            const key  = [g.id, r.id].sort().join('|');
+            if (!seen.has(key)) {
+              seen.add(key);
+              proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct, traj });
             }
           }
         }
 
         // 2:1 — I give 2, I receive 1 (to get an upgrade)
-        const myDepth2 = (myTeam.byPos[strengthPos] || []).length - 2;
-        if (myDepth2 >= minRemainingDepth(strengthPos) && theirDepth1 >= minRemainingDepth(needPos)) {
-          for (const r of theyHave.slice(0, 3)) {
-            if (r.v < 500) continue;
-            for (let i = 0; i < Math.min(myGive.length - 1, 4); i++) {
-              for (let j = i + 1; j < Math.min(myGive.length, 5); j++) {
-                const g1 = myGive[i], g2 = myGive[j];
-                const gv = g1.v + g2.v;
-                const diff = r.v - gv;
-                const pct  = Math.abs(diff) / Math.max(gv, r.v, 1);
-                if (pct <= 0.25) {
-                  const key = [g1.id, g2.id, r.id].sort().join('|');
-                  if (!seen.has(key)) {
-                    seen.add(key);
-                    proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct, traj });
-                  }
+        for (const r of theyHave.slice(0, 3)) {
+          if (r.v < 500) continue;
+          if (!hasViableDepthAfterTrade(other, needPos, [r.id], posAvg)) continue;
+          for (let i = 0; i < Math.min(myGive.length - 1, 4); i++) {
+            for (let j = i + 1; j < Math.min(myGive.length, 5); j++) {
+              const g1 = myGive[i], g2 = myGive[j];
+              if (!hasViableDepthAfterTrade(myTeam, strengthPos, [g1.id, g2.id], posAvg)) continue;
+              const gv   = g1.v + g2.v;
+              const diff = r.v - gv;
+              const pct  = Math.abs(diff) / Math.max(gv, r.v, 1);
+              if (pct <= 0.25) {
+                const key = [g1.id, g2.id, r.id].sort().join('|');
+                if (!seen.has(key)) {
+                  seen.add(key);
+                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct, traj });
                 }
               }
             }
