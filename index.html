@@ -482,7 +482,7 @@ let G_dismissed         = new Set(); // persisted to localStorage; survives refr
 let G_transactions     = []; // full season transaction history (all weeks)
 let G_rejectedProposals = {}; // { partnerId: [{ givePositions, recvPositions, created }] }
 
-const DISPLAY_PER_TAB = 5; // proposals visible per tab; rest are reserve — dismiss reveals next
+const DISPLAY_PER_TAB = 3; // proposals visible per tab; rest are reserve — dismiss reveals next
 
 const TRADE_TABS = [
   { key: 'depth', label: 'Fill Depth',               desc: 'Address your positional weaknesses with like-for-like swaps.' },
@@ -937,15 +937,19 @@ function buildPosTradeFreq(transactions) {
 function buildRejectedProposals(transactions, myRosterId) {
   const result = {}; // { partnerId: [{ givePositions, recvPositions, created }] }
   if (!myRosterId) return result;
+  const myId = String(myRosterId); // normalise to string for type-safe comparisons
   for (const txn of transactions) {
     if (txn.type !== 'trade') continue;
     if (txn.status !== 'rejected') continue;
-    // Only care about proposals I made
-    const proposer = txn.proposer_roster_id;
-    if (proposer !== myRosterId) continue;
-    // Find the partner (they rejected)
-    const parties   = txn.roster_ids || txn.consenter_roster_ids || txn.consenter_ids || [];
-    const partnerId = parties.find(id => id !== myRosterId);
+    // All roster IDs involved in this transaction
+    const parties = (txn.roster_ids || txn.consenter_roster_ids || txn.consenter_ids || [])
+      .map(String);
+    if (!parties.includes(myId)) continue; // I'm not a party to this trade
+    // Prefer trades I proposed; fall back to any rejected trade I was part of
+    const proposer = txn.proposer_roster_id != null ? String(txn.proposer_roster_id) : null;
+    if (proposer !== null && proposer !== myId) continue;
+    // Find the partner
+    const partnerId = parties.find(id => id !== myId);
     if (!partnerId) continue;
     const adds = txn.adds || {};
     const givePositions = [];
@@ -956,10 +960,11 @@ function buildRejectedProposals(transactions, myRosterId) {
       const player = S.players[String(playerId)];
       const pos    = player && player.position;
       if (!['QB','RB','WR','TE'].includes(pos)) continue;
-      if (receivingRosterId === partnerId) {
+      const rid = String(receivingRosterId);
+      if (rid === partnerId) {
         givePositions.push(pos);
         giveNames.push(pname(player));
-      } else if (receivingRosterId === myRosterId) {
+      } else if (rid === myId) {
         recvPositions.push(pos);
         recvNames.push(pname(player));
       }
@@ -1990,7 +1995,11 @@ function renderTrades(trades, traj) {
     </div>`;
   }).join('');
 
-  $('tradesContent').innerHTML = `<div class="trade-tabs">${tabButtons}</div>${tabPanes}`;
+  const totalRejections = Object.values(G_rejectedProposals).reduce((s, arr) => s + arr.length, 0);
+  const historyNote = G_transactions.length > 0
+    ? `<p style="font-size:11px;color:var(--muted);margin:0 0 12px;">${G_transactions.filter(t=>t.type==='trade').length} trades in league history${totalRejections > 0 ? ` · <strong style="color:#856404">${totalRejections} past rejection${totalRejections>1?'s':''} from you detected</strong>` : ''}</p>`
+    : '';
+  $('tradesContent').innerHTML = `${historyNote}<div class="trade-tabs">${tabButtons}</div>${tabPanes}`;
 }
 
 function renderPath(myTeam, posAvg, trades, traj) {
