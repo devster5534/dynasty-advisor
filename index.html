@@ -258,6 +258,29 @@
       padding-top: 10px; line-height: 1.5;
     }
 
+    /* ---- Trade tabs ---- */
+    .trade-tabs {
+      display: flex; gap: 0; flex-wrap: wrap;
+      border-bottom: 2px solid var(--border); margin-bottom: 18px;
+    }
+    .tab-btn {
+      padding: 9px 14px; border: none; border-bottom: 3px solid transparent;
+      background: none; font-size: 12px; font-weight: 500; color: var(--muted);
+      cursor: pointer; font-family: inherit; margin-bottom: -2px; white-space: nowrap;
+      transition: color .15s;
+    }
+    .tab-btn:hover { color: var(--navy); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
+    .tab-count {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 18px; height: 18px; border-radius: 9px; padding: 0 4px;
+      background: var(--border); font-size: 10px; font-weight: 700;
+      margin-left: 5px; color: var(--navy);
+    }
+    .tab-btn.active .tab-count { background: var(--accent); color: #fff; }
+    .tab-pane { display: block; }
+    .tab-pane.hidden { display: none; }
+
     /* ---- Path forward ---- */
     .traj-chip {
       display: inline-flex; align-items: center; gap: 8px;
@@ -1341,97 +1364,144 @@ function renderDraftPicks() {
   show('picksCard');
 }
 
+function classifyTrade(t, posAvg) {
+  const recvMaxVal = Math.max(...t.recv.map(x => x.v));
+  const recvAvgAge = t.recv.map(x => x.p.age || 26).reduce((s, a) => s + a, 0) / t.recv.length;
+  const giveAvgAge = t.give.map(x => x.p.age || 26).reduce((s, a) => s + a, 0) / t.give.length;
+  // "Top asset" = received player is worth ≥25% of league avg total for that position
+  if (recvMaxVal >= posAvg[t.recvPos] * 0.25) return 'top';
+  // "Young value" = getting someone under 25 (with real value already filtered upstream)
+  if (recvAvgAge < 25) return 'young';
+  // "Add vets" = getting someone 28+
+  if (recvAvgAge >= 28 || (recvAvgAge >= 27 && giveAvgAge < recvAvgAge)) return 'vet';
+  return 'depth';
+}
+
+function renderTradeCard(t, teams, posAvg, traj) {
+  const giveVal = t.give.reduce((s, x) => s + x.v, 0);
+  const recvVal = t.recv.reduce((s, x) => s + x.v, 0);
+  const diff    = t.diff;
+  const absPct  = Math.abs(diff) / Math.max(giveVal, recvVal, 1);
+  const cls     = absPct < 0.05 ? 'even' : diff > 0 ? 'win' : 'loss';
+  const lbl     = absPct < 0.05 ? 'Even Trade' : diff > 0 ? 'You Win' : 'Slight Overpay';
+
+  const profile   = G_tradeProfiles[t.partnerId] || null;
+  const profLabel = tradeProfileLabel(profile);
+  const profTag   = `<span class="partner-tag ${profLabel.cls}">${profLabel.label}</span>`;
+
+  const otherTeam = teams.find(t2 => t2.rosterId === t.partnerId);
+  const myTeam    = teams.find(t2 => t2.isMe);
+  const ratio = (team, pos) => team ? positionTotal(team.byPos[pos] || []) / Math.max(posAvg[pos], 1) : 1;
+
+  const myGivePct   = (ratio(myTeam,    t.givePos) * 100).toFixed(0);
+  const myRecvPct   = (ratio(myTeam,    t.recvPos) * 100).toFixed(0);
+  const theirRecvPct = (ratio(otherTeam, t.recvPos) * 100).toFixed(0);
+  const theirGivePct = (ratio(otherTeam, t.givePos) * 100).toFixed(0);
+
+  const sign = diff >= 0 ? '+' : '';
+  const youAcceptWhy = `You're ${myGivePct}% of league avg at ${t.givePos} (relative strength) and ${myRecvPct}% at ${t.recvPos} (biggest need). Addresses your weakness without gutting a stronger position. Net value: ${sign}${diff.toLocaleString()} pts.`;
+
+  let theyAcceptWhy = `${t.partner} is at ${theirRecvPct}% of league avg at ${t.recvPos} — they have depth to spare. In return they fill their ${t.givePos} gap (currently at ${theirGivePct}% of avg).`;
+  if (profile && profile.count > 0) {
+    const theyBuyPos = ['QB','RB','WR','TE'].filter(pos =>
+      (profile.playersReceived || []).filter(id => playerInfo(id).position === pos).length >= 2
+    );
+    if (theyBuyPos.length) theyAcceptWhy += ` Trade history shows they actively acquire ${theyBuyPos.join('/')} — this fits their pattern.`;
+    else if (profile.picksReceived > profile.picksSent) theyAcceptWhy += ` They tend to receive picks — adding one could seal the deal.`;
+  }
+
+  const playerCard = (x, pos) => {
+    const src = playerValSources(x.id);
+    return `<div class="trade-player">
+      <div class="tp-name">${pname(x.p)}</div>
+      <div class="tp-meta">${x.p.maybeTeam || x.p.team || 'FA'} · ${pos}${x.p.maybeAge || x.p.age ? ' · Age ' + (x.p.maybeAge || x.p.age) : ''}</div>
+      <div class="tp-val">${x.v.toLocaleString()} pts</div>
+      ${src ? `<div class="tp-sources">${src}</div>` : ''}
+    </div>`;
+  };
+
+  const giveSide  = t.give.map(x => playerCard(x, t.givePos)).join('');
+  const recvSide  = t.recv.map(x => playerCard(x, t.recvPos)).join('');
+  const alignNote = tradeAlignmentNote(t, traj);
+
+  return `<div class="trade-card">
+    <div class="trade-hdr">
+      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;">
+        <div class="trade-partner">Trade with ${t.partner}</div>
+        ${profTag}
+      </div>
+      <div class="badge ${cls}">${lbl}</div>
+    </div>
+    <div class="trade-flow">
+      <div>
+        <div class="trade-side-lbl send">You Send</div>
+        ${giveSide}
+      </div>
+      <div class="trade-arrow">⇄</div>
+      <div>
+        <div class="trade-side-lbl recv">You Get</div>
+        ${recvSide}
+      </div>
+    </div>
+    <div class="trade-why"><strong>Why you accept:</strong> ${youAcceptWhy}${alignNote ? ' ' + alignNote : ''}</div>
+    <div class="trade-why" style="margin-top:6px;"><strong>Why they accept:</strong> ${theyAcceptWhy}</div>
+  </div>`;
+}
+
+function switchTradeTab(key) {
+  document.querySelectorAll('#tradesContent .tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('#tradesContent .tab-pane').forEach(p => p.classList.add('hidden'));
+  const btn = document.querySelector(`#tradesContent .tab-btn[data-tab="${key}"]`);
+  if (btn) btn.classList.add('active');
+  const pane = document.getElementById('trade-tab-' + key);
+  if (pane) pane.classList.remove('hidden');
+}
+
 function renderTrades(trades, traj) {
   if (!S.hasValues) {
     $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">Dynasty values couldn't load — click Refresh Data to try again.</p>`;
     return;
   }
   if (!trades.length) {
-    const analysis = analyzeAll();
-    const { posAvg, myTeam } = analysis;
-    const myRatio = pos => positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
-    const ratioInfo = ['QB','RB','WR','TE'].map(p => `${p}: ${(myRatio(p)*100).toFixed(0)}%`).join(' | ');
-    $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">No trades generated. Position ratios vs. league avg: ${ratioInfo}. Values loaded: ${Object.keys(S.values).length}. Check browser console (F12 → Console) for details.</p>`;
+    $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">No trade proposals found with viable depth on both sides. Try refreshing data or check back after roster moves settle.</p>`;
     return;
   }
 
   const { teams, posAvg } = analyzeAll();
 
-  $('tradesContent').innerHTML = trades.map(t => {
-    const giveVal = t.give.reduce((s, x) => s + x.v, 0);
-    const recvVal = t.recv.reduce((s, x) => s + x.v, 0);
-    const diff    = t.diff;
-    const absPct  = Math.abs(diff) / Math.max(giveVal, recvVal, 1);
-    const cls     = absPct < 0.05 ? 'even' : diff > 0 ? 'win' : 'loss';
-    const lbl     = absPct < 0.05 ? 'Even Trade' : diff > 0 ? 'You Win' : 'Slight Overpay';
+  const TABS = [
+    { key: 'depth', label: 'Fill Depth',               desc: 'Address your positional weaknesses with like-for-like swaps.' },
+    { key: 'young', label: 'Gain Young Value / Picks',  desc: 'Trade for players under 25 — build for the future.' },
+    { key: 'vet',   label: 'Add Vets',                  desc: 'Win-now moves targeting proven, prime-age producers.' },
+    { key: 'top',   label: 'Go for Top Dynasty Assets', desc: 'Aggressive pushes for elite dynasty value.' },
+  ];
 
-    // Trade profile for this partner
-    const profile   = G_tradeProfiles[t.partnerId] || null;
-    const profLabel = tradeProfileLabel(profile);
-    const profTag   = `<span class="partner-tag ${profLabel.cls}">${profLabel.label}</span>`;
+  // Bucket trades into categories
+  const buckets = { depth: [], young: [], vet: [], top: [] };
+  for (const t of trades) buckets[classifyTrade(t, posAvg)].push(t);
 
-    // Position ratios for both sides
-    const otherTeam = teams.find(t2 => t2.rosterId === t.partnerId);
-    const myTeam    = teams.find(t2 => t2.isMe);
-    const ratio = (team, pos) => team ? positionTotal(team.byPos[pos] || []) / Math.max(posAvg[pos], 1) : 1;
+  // Default to first non-empty tab
+  const firstKey = (TABS.find(tb => buckets[tb.key].length > 0) || TABS[0]).key;
 
-    const myGivePosRatio    = (ratio(myTeam,    t.givePos) * 100).toFixed(0);
-    const myRecvPosRatio    = (ratio(myTeam,    t.recvPos) * 100).toFixed(0);
-    const theirGivePosRatio = (ratio(otherTeam, t.recvPos) * 100).toFixed(0); // they give recvPos
-    const theirNeedRatio    = (ratio(otherTeam, t.givePos) * 100).toFixed(0); // they need givePos
+  const tabButtons = TABS.map(tb => {
+    const n = buckets[tb.key].length;
+    return `<button class="tab-btn${tb.key === firstKey ? ' active' : ''}" data-tab="${tb.key}" onclick="switchTradeTab('${tb.key}')">
+      ${tb.label}${n ? `<span class="tab-count">${n}</span>` : ''}
+    </button>`;
+  }).join('');
 
-    // Why you accept
-    const sign = diff >= 0 ? '+' : '';
-    const youAcceptWhy = `You're ${myGivePosRatio}% of league avg at ${t.givePos} (a relative strength) and only ${myRecvPosRatio}% at ${t.recvPos} (your biggest need). This trade addresses your weakest spot without gutting a stronger one. Net value: ${sign}${diff.toLocaleString()} pts.`;
-
-    // Why they accept
-    let theyAcceptWhy = `${t.partner} is at ${theirGivePosRatio}% of league avg at ${t.recvPos} — they have depth there and can afford to deal. In return they get ${t.givePos} help where they're at ${theirNeedRatio}% of avg.`;
-    if (profile && profile.count > 0) {
-      const theyBuyPos = ['QB','RB','WR','TE'].filter(pos => {
-        return (profile.playersReceived || []).filter(id => playerInfo(id).position === pos).length >= 2;
-      });
-      if (theyBuyPos.length) theyAcceptWhy += ` Trade history shows they actively acquire ${theyBuyPos.join('/')} — this fits their pattern.`;
-      else if (profile.picksReceived > profile.picksSent) theyAcceptWhy += ` They tend to receive picks in deals — a pick sweetener could seal it.`;
-    }
-
-    const playerCard = (x, pos) => {
-      const src = playerValSources(x.id);
-      return `<div class="trade-player">
-        <div class="tp-name">${pname(x.p)}</div>
-        <div class="tp-meta">${x.p.maybeTeam || x.p.team || 'FA'} · ${pos}${x.p.maybeAge || x.p.age ? ' · Age ' + (x.p.maybeAge || x.p.age) : ''}</div>
-        <div class="tp-val">${x.v.toLocaleString()} pts</div>
-        ${src ? `<div class="tp-sources">${src}</div>` : ''}
-      </div>`;
-    };
-
-    const giveSide = t.give.map(x => playerCard(x, t.givePos)).join('');
-    const recvSide = t.recv.map(x => playerCard(x, t.recvPos)).join('');
-
-    const alignNote = tradeAlignmentNote(t, traj);
-
-    return `<div class="trade-card">
-      <div class="trade-hdr">
-        <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;">
-          <div class="trade-partner">Trade with ${t.partner}</div>
-          ${profTag}
-        </div>
-        <div class="badge ${cls}">${lbl}</div>
-      </div>
-      <div class="trade-flow">
-        <div>
-          <div class="trade-side-lbl send">You Send</div>
-          ${giveSide}
-        </div>
-        <div class="trade-arrow">⇄</div>
-        <div>
-          <div class="trade-side-lbl recv">You Get</div>
-          ${recvSide}
-        </div>
-      </div>
-      <div class="trade-why"><strong>Why you accept:</strong> ${youAcceptWhy}${alignNote ? ' ' + alignNote : ''}</div>
-      <div class="trade-why" style="margin-top:6px;"><strong>Why they accept:</strong> ${theyAcceptWhy}</div>
+  const tabPanes = TABS.map(tb => {
+    const list = buckets[tb.key];
+    const content = list.length
+      ? list.map(t => renderTradeCard(t, teams, posAvg, traj)).join('')
+      : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No trades in this category right now — check the other tabs or refresh data after roster moves settle.</p>`;
+    return `<div class="tab-pane${tb.key !== firstKey ? ' hidden' : ''}" id="trade-tab-${tb.key}">
+      <p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>
+      ${content}
     </div>`;
   }).join('');
+
+  $('tradesContent').innerHTML = `<div class="trade-tabs">${tabButtons}</div>${tabPanes}`;
 }
 
 function renderPath(myTeam, posAvg, trades, traj) {
