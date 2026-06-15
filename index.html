@@ -727,11 +727,7 @@ function playerInfo(id) { return S.players[String(id)] || {}; }
 function positionTotal(arr) { return arr.reduce((s, p) => s + p.v, 0); }
 
 function buildTeamByPos(roster) {
-  const allIds = [
-    ...(roster.players || []),
-    ...(roster.reserve || []),
-    ...(roster.taxi || []),
-  ];
+  const allIds = [...new Set(roster.players || [])];
   const byPos = { QB: [], RB: [], WR: [], TE: [] };
   for (const id of allIds) {
     const p   = playerInfo(id);
