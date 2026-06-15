@@ -445,9 +445,12 @@ const DP_URL = 'https://raw.githubusercontent.com/dynastyprocess/data/master/fil
 let G_tradeProfiles = {};
 let G_teamPicks     = {};
 
-function savedRosterKey(leagueId) { return 'da_roster_' + leagueId; }
-function getSavedRoster(leagueId) { return localStorage.getItem(savedRosterKey(leagueId)); }
-function saveRoster(leagueId, rosterId) { localStorage.setItem(savedRosterKey(leagueId), String(rosterId)); }
+function savedRosterKey(leagueId)  { return 'da_roster_'  + leagueId; }
+function savedLeagueKey()          { return 'da_league_v1'; }
+function getSavedRoster(leagueId)  { return localStorage.getItem(savedRosterKey(leagueId)); }
+function saveRoster(leagueId, rid) { localStorage.setItem(savedRosterKey(leagueId), String(rid)); }
+function getSavedLeague()          { return localStorage.getItem(savedLeagueKey()); }
+function saveLeague(leagueId)      { localStorage.setItem(savedLeagueKey(), leagueId); }
 
 // ---- State ----
 const S = {
@@ -660,6 +663,13 @@ async function doLoadLeagues() {
       throw new Error('No NFL leagues found for ' + S.username + ' in ' + SEASON + '. The 2025 season may not be set up yet.');
     }
 
+    // Auto-restore last league if saved
+    const savedLid = getSavedLeague();
+    if (savedLid) {
+      const match = all.find(l => l.league_id === savedLid);
+      if (match) { await doLoadLeague(match); return; }
+    }
+
     hide('loadingScreen');
     renderLeagueList();
     show('leagueScreen');
@@ -675,6 +685,7 @@ async function doLoadLeague(league) {
   hide('leagueScreen');
   show('loadingScreen');
   S.league = league;
+  saveLeague(league.league_id);
   $('hdrLeague').textContent = league.name;
   $('leagueChip').style.display = '';
 
@@ -984,25 +995,25 @@ function findTrades(analysis) {
   const { teams, posAvg, myTeam } = analysis;
   if (!myTeam) return [];
 
-  const myS = calcSurplus(myTeam, posAvg);
-  const myNeeds    = ['QB','RB','WR','TE'].filter(p => myS[p] < 0).sort((a,b) => myS[a] - myS[b]);
-  const myStrengths = ['QB','RB','WR','TE'].filter(p => myS[p] > 0).sort((a,b) => myS[b] - myS[a]);
-
-  if (!myNeeds.length || !myStrengths.length) return [];
+  // Use ratio (my value / league avg) so trades always generate even if below avg everywhere
+  const myRatio = pos => positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
+  const posByRatio = ['QB','RB','WR','TE'].sort((a, b) => myRatio(b) - myRatio(a));
+  const myStrengths = posByRatio.slice(0, 2); // top 2 relative positions
+  const myNeeds     = posByRatio.slice(2);    // bottom 2 relative positions
 
   const proposals = [];
   const seen = new Set();
 
   for (const other of teams) {
     if (other.isMe) continue;
-    const theirS = calcSurplus(other, posAvg);
-
+    const theirRatio = pos => positionTotal(other.byPos[pos] || []) / Math.max(posAvg[pos], 1);
     for (const needPos of myNeeds) {
       for (const strengthPos of myStrengths) {
-        if (!( theirS[needPos] > 0 && theirS[strengthPos] < 0 )) continue;
+        // They're relatively strong where I need help, and weaker where I'm relatively stronger
+        if (!( theirRatio(needPos) > theirRatio(strengthPos) )) continue;
 
-        const myGive   = (myTeam.byPos[strengthPos] || []).filter(x => x.v > 300);
-        const theyHave = (other.byPos[needPos]       || []).filter(x => x.v > 300);
+        const myGive   = (myTeam.byPos[strengthPos] || []).filter(x => x.v > 100);
+        const theyHave = (other.byPos[needPos]       || []).filter(x => x.v > 100);
         if (!myGive.length || !theyHave.length) continue;
 
         // 1:1 swaps
@@ -1010,7 +1021,7 @@ function findTrades(analysis) {
           for (const r of theyHave.slice(0, 5)) {
             const diff = r.v - g.v;
             const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
-            if (pct <= 0.22) {
+            if (pct <= 0.30) {
               const key = [g.id, r.id].sort().join('|');
               if (!seen.has(key)) {
                 seen.add(key);
@@ -1022,7 +1033,7 @@ function findTrades(analysis) {
 
         // 2:1 — I give 2, I receive 1 (to get an upgrade)
         for (const r of theyHave.slice(0, 3)) {
-          if (r.v < 2000) continue;
+          if (r.v < 800) continue;
           for (let i = 0; i < Math.min(myGive.length - 1, 4); i++) {
             for (let j = i + 1; j < Math.min(myGive.length, 5); j++) {
               const g1 = myGive[i], g2 = myGive[j];
@@ -1045,7 +1056,7 @@ function findTrades(analysis) {
 
   return proposals
     .sort((a, b) => Math.abs(a.diff) - Math.abs(b.diff))
-    .slice(0, 7);
+    .slice(0, 10);
 }
 
 // ---- Trajectory ----
@@ -1348,6 +1359,7 @@ function renderPath(myTeam, posAvg, trades, traj) {
 
 // ---- Utilities ----
 function switchLeague() {
+  localStorage.removeItem(savedLeagueKey());
   hide('dashboard');
   renderLeagueList();
   show('leagueScreen');
