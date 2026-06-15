@@ -307,7 +307,10 @@
       <div class="hdr-league" id="hdrLeague">Sleeper-powered team analysis</div>
     </div>
   </div>
-  <button class="user-chip" id="userChip" onclick="changeUser()">Devster5534</button>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <button class="user-chip" id="leagueChip" onclick="switchLeague()" style="display:none;">Switch league</button>
+    <button class="user-chip" id="userChip" onclick="changeUser()">Devster5534</button>
+  </div>
 </header>
 
 <main>
@@ -560,24 +563,15 @@ async function doLoadLeagues() {
 
     setProgress('Loading leagues...');
     const all = await sleeper('/user/' + S.userId + '/leagues/nfl/' + SEASON) || [];
+    S.leagues = all;
 
-    // Prefer dynasty (type=2), then keeper (type=1), then all
-    let filtered = all.filter(l => l.settings && l.settings.type === 2);
-    if (!filtered.length) filtered = all.filter(l => l.settings && l.settings.type === 1);
-    if (!filtered.length) filtered = all;
-    S.leagues = filtered;
-
-    if (!filtered.length) {
+    if (!all.length) {
       throw new Error('No NFL leagues found for ' + S.username + ' in ' + SEASON + '. The 2025 season may not be set up yet.');
     }
 
-    if (filtered.length === 1) {
-      await doLoadLeague(filtered[0]);
-    } else {
-      hide('loadingScreen');
-      renderLeagueList();
-      show('leagueScreen');
-    }
+    hide('loadingScreen');
+    renderLeagueList();
+    show('leagueScreen');
   } catch (e) {
     hide('loadingScreen');
     $('usernameErr').textContent = e.message;
@@ -591,6 +585,7 @@ async function doLoadLeague(league) {
   show('loadingScreen');
   S.league = league;
   $('hdrLeague').textContent = league.name;
+  $('leagueChip').style.display = '';
 
   try {
     setProgress('Loading rosters & players...');
@@ -649,20 +644,38 @@ async function doLoadLeague(league) {
 
 // ---- League list ----
 function renderLeagueList() {
+  // Sort: dynasty first, then keeper, then standard; within each group alphabetical
+  const typeOrder = { 2: 0, 1: 1, 0: 2 };
+  const sorted = [...S.leagues].sort((a, b) => {
+    const ta = (a.settings && a.settings.type) || 0;
+    const tb = (b.settings && b.settings.type) || 0;
+    return (typeOrder[ta] ?? 3) - (typeOrder[tb] ?? 3) || a.name.localeCompare(b.name);
+  });
+
+  // Status badge: show "Folded?" if league status is archived or has 0 total_rosters
+  const statusLabel = l => {
+    const s = l.status;
+    if (s === 'archived') return ' · Archived';
+    return '';
+  };
+
   const list = $('leagueList');
-  list.innerHTML = S.leagues.map((l, i) =>
-    `<div class="league-opt" data-idx="${i}">
+  list.innerHTML = sorted.map((l, i) =>
+    `<div class="league-opt" data-name="${l.league_id}">
       <div>
         <div class="league-opt-name">${l.name}</div>
-        <div class="league-opt-meta">${leagueTypeLabel(l.settings)} · ${l.total_rosters || '?'} teams · ${SEASON}</div>
+        <div class="league-opt-meta">${leagueTypeLabel(l.settings)} · ${l.total_rosters || '?'} teams${statusLabel(l)}</div>
       </div>
       <div class="league-opt-arrow">›</div>
     </div>`
   ).join('');
 
   list.addEventListener('click', e => {
-    const el = e.target.closest('[data-idx]');
-    if (el) doLoadLeague(S.leagues[+el.dataset.idx]);
+    const el = e.target.closest('[data-name]');
+    if (el) {
+      const league = S.leagues.find(l => l.league_id === el.dataset.name);
+      if (league) doLoadLeague(league);
+    }
   });
 }
 
@@ -1094,6 +1107,12 @@ function renderPath(myTeam, posAvg, trades, traj) {
 }
 
 // ---- Utilities ----
+function switchLeague() {
+  hide('dashboard');
+  renderLeagueList();
+  show('leagueScreen');
+}
+
 function changeUser() {
   if (!confirm('Switch Sleeper username?')) return;
   localStorage.removeItem(CACHE.username.key);
