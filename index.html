@@ -473,6 +473,9 @@ let G_teamPicks      = {};
 let G_posTradeFreq   = { QB:0, RB:0, WR:0, TE:0, total:0 };
 let G_tradePools     = { depth: [], young: [], vet: [], top: [] };
 let G_tradeCtx       = null; // { teams, posAvg, traj } — kept for dismiss re-render
+let G_dismissed      = new Set(); // persisted to localStorage; survives refresh
+
+const DISPLAY_PER_TAB = 5; // proposals visible per tab; rest are reserve — dismiss reveals next
 
 const TRADE_TABS = [
   { key: 'depth', label: 'Fill Depth',               desc: 'Address your positional weaknesses with like-for-like swaps.' },
@@ -1806,23 +1809,36 @@ function rerenderTabPane(tabKey) {
   const pane = document.getElementById('trade-tab-' + tabKey);
   if (!tb || !pane) return;
   const pool = G_tradePools[tabKey];
-  const list = applyTabFilter(pool, tabKey);
+  const all  = applyTabFilter(pool, tabKey);
+  const list = all.slice(0, DISPLAY_PER_TAB);
   const content = list.length
     ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tabKey)).join('')
     : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No more proposals in this category — check the other tabs or refresh data after roster moves settle.</p>`;
   pane.innerHTML = `<p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>${content}`;
-  // Update tab count badge
+  // Update tab count badge — shows total available (including reserve beyond displayed limit)
   const btn = document.querySelector(`#tradesContent .tab-btn[data-tab="${tabKey}"]`);
   if (btn) {
-    const n = applyTabFilter(pool, tabKey).length;
+    const n = all.length;
     let span = btn.querySelector('.tab-count');
     if (!span && n > 0) { span = document.createElement('span'); span.className = 'tab-count'; btn.appendChild(span); }
     if (span) span.textContent = n > 0 ? n : '';
   }
 }
 
+const dismissedKey = () => `dynasty_dismissed_${(S.league && S.league.league_id) || 'default'}`;
+function loadDismissed() {
+  try { return new Set(JSON.parse(localStorage.getItem(dismissedKey()) || '[]')); }
+  catch { return new Set(); }
+}
+function saveDismissed() {
+  try { localStorage.setItem(dismissedKey(), JSON.stringify([...G_dismissed])); }
+  catch {}
+}
+
 function dismissTrade(tradeId, tabKey) {
   if (!tradeId || !tabKey || !G_tradePools[tabKey]) return;
+  G_dismissed.add(tradeId);
+  saveDismissed();
   G_tradePools[tabKey] = G_tradePools[tabKey].filter(t => t._id !== tradeId);
   rerenderTabPane(tabKey);
 }
@@ -1840,9 +1856,12 @@ function renderTrades(trades, traj) {
   const { teams, posAvg } = analyzeAll();
   G_tradeCtx = { teams, posAvg, traj };
 
-  // Populate global pools (full lists, not capped — dismiss pulls from here)
+  // Load persisted dismissals; filter them out before populating pools
+  G_dismissed = loadDismissed();
   G_tradePools = { depth: [], young: [], vet: [], top: [] };
-  for (const t of trades) G_tradePools[classifyTrade(t, posAvg)].push(t);
+  for (const t of trades) {
+    if (!G_dismissed.has(t._id)) G_tradePools[classifyTrade(t, posAvg)].push(t);
+  }
 
   const firstKey = (TRADE_TABS.find(tb => G_tradePools[tb.key].length > 0) || TRADE_TABS[0]).key;
 
@@ -1854,7 +1873,8 @@ function renderTrades(trades, traj) {
   }).join('');
 
   const tabPanes = TRADE_TABS.map(tb => {
-    const list    = applyTabFilter(G_tradePools[tb.key], tb.key);
+    const all  = applyTabFilter(G_tradePools[tb.key], tb.key);
+    const list = all.slice(0, DISPLAY_PER_TAB);
     const content = list.length
       ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tb.key)).join('')
       : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No trades in this category right now — check the other tabs or refresh data after roster moves settle.</p>`;
