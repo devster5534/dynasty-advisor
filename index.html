@@ -352,13 +352,8 @@
   <!-- Dashboard -->
   <div id="dashboard" class="hidden">
 
-    <div id="debugBanner" style="background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#713f12;display:none;">
-      <strong>Loaded:</strong> <span id="debugLeague"></span> &nbsp;|&nbsp;
-      <strong>League ID:</strong> <span id="debugLeagueId"></span> &nbsp;|&nbsp;
-      <strong>Your team:</strong> <span id="debugTeam"></span>
-    </div>
 
-    <div class="card" id="overviewCard">
+<div class="card" id="overviewCard">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
         <div class="card-title" style="margin-bottom:0;">Team Overview</div>
         <button class="btn btn-sm" onclick="pickTeam()" style="font-size:11px;">Wrong team?</button>
@@ -952,12 +947,6 @@ function renderDashboard() {
   const analysis = analyzeAll();
   const { teams, posAvg, myTeam } = analysis;
 
-  // Debug banner — always visible so we can verify the right data is loading
-  const banner = $('debugBanner');
-  $('debugLeague').textContent   = S.league ? S.league.name : '?';
-  $('debugLeagueId').textContent = S.league ? S.league.league_id : '?';
-  $('debugTeam').textContent     = myTeam ? myTeam.ownerName : '?';
-  banner.style.display = 'block';
 
   // Rank
   const sorted = [...teams].sort((a, b) => b.totalVal - a.totalVal);
