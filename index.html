@@ -745,8 +745,9 @@ async function doLoadLeague(league) {
   try {
     setProgress('Loading rosters, players & trade history...');
     const isSF = (league.roster_positions || []).includes('SUPER_FLEX');
-    const txWeeks = Array.from({ length: 18 }, (_, i) =>
-      sleeper('/league/' + league.league_id + '/transactions/' + (i + 1)).catch(() => [])
+    // Fetch rounds 0–20 to cover pre-season, all regular-season weeks, and playoffs
+    const txWeeks = Array.from({ length: 21 }, (_, i) =>
+      sleeper('/league/' + league.league_id + '/transactions/' + i).catch(() => [])
     );
     const [rosters, users, players, fcRaw, txArrays, tradedPicks, dpRaw] = await Promise.all([
       sleeper('/league/' + league.league_id + '/rosters'),
@@ -1996,9 +1997,14 @@ function renderTrades(trades, traj) {
   }).join('');
 
   const totalRejections = Object.values(G_rejectedProposals).reduce((s, arr) => s + arr.length, 0);
-  const historyNote = G_transactions.length > 0
-    ? `<p style="font-size:11px;color:var(--muted);margin:0 0 12px;">${G_transactions.filter(t=>t.type==='trade').length} trades in league history${totalRejections > 0 ? ` · <strong style="color:#856404">${totalRejections} past rejection${totalRejections>1?'s':''} from you detected</strong>` : ''}</p>`
+  const tradeCount = G_transactions.filter(t => t.type === 'trade').length;
+  const historyLine = tradeCount > 0
+    ? `${tradeCount} trades in league history`
+    : `No trade history found (${G_transactions.length} total transactions)`;
+  const rejLine = totalRejections > 0
+    ? ` &middot; <strong style="color:#856404">${totalRejections} past rejection${totalRejections > 1 ? 's' : ''} from you found</strong>`
     : '';
+  const historyNote = `<p style="font-size:11px;color:var(--muted);margin:0 0 12px;">${historyLine}${rejLine}</p>`;
   $('tradesContent').innerHTML = `${historyNote}<div class="trade-tabs">${tabButtons}</div>${tabPanes}`;
 }
 
