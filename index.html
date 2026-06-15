@@ -1510,15 +1510,14 @@ function findClearRosterTrades(analysis, expanded = false) {
   const seen      = new Set();
 
   for (const pos of ['RB', 'WR', 'TE', 'QB']) {
-    const myAtPos = (myTeam.byPos[pos] || []).filter(x => x.v > 100);
-    if (myAtPos.length < 3) continue; // need at least 3 to send 2 and keep 1
-    const myRatioAtPos = positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
-    if (myRatioAtPos < 1.1) continue; // only offer from positions I'm actually stacked at
+    // Any position where I have 3+ players with meaningful value is a candidate
+    const myAtPos = (myTeam.byPos[pos] || []).filter(x => x.v > 50);
+    if (myAtPos.length < 3) continue;
 
     for (let i = 0; i < Math.min(myAtPos.length - 1, expanded ? 7 : 5); i++) {
       for (let j = i + 1; j < Math.min(myAtPos.length, expanded ? 8 : 6); j++) {
         const g1 = myAtPos[i], g2 = myAtPos[j];
-        // Clear trades intentionally thin a position — just need enough players left to cover starters
+        // Must keep at least enough to cover starters after the trade
         const afterTrade = myAtPos.filter(x => x.id !== g1.id && x.id !== g2.id);
         if (afterTrade.length < starterCount(pos)) continue;
         const giveVal = g1.v + g2.v;
@@ -1527,21 +1526,20 @@ function findClearRosterTrades(analysis, expanded = false) {
           if (other.isMe) continue;
 
           for (const needPos of ['QB', 'RB', 'WR', 'TE']) {
-            // Don't request players at a position I'm already stacked at
-            const myNeedRatio = positionTotal(myTeam.byPos[needPos] || []) / Math.max(posAvg[needPos], 1);
-            if (myNeedRatio > 1.15) continue;
+            // Wide value window — the point is to consolidate, not to win the trade on value
+            const lo = giveVal * 0.45, hi = giveVal * (expanded ? 1.35 : 1.20);
+            const theyHave = (other.byPos[needPos] || []).filter(x =>
+              x.v >= lo && x.v <= hi && x.v > 150
+            );
 
-            const theyHave = (other.byPos[needPos] || []).filter(x => {
-              const lo = giveVal * 0.55, hi = giveVal * (expanded ? 1.15 : 1.05);
-              return x.v >= lo && x.v <= hi && x.v > 200;
-            });
-
-            for (const recv of theyHave.slice(0, expanded ? 4 : 2)) {
-              if (!hasViableDepthAfterTrade(other, needPos, [recv.id], posAvg)) continue;
+            // Other team just needs to keep at least their starter count at that position
+            for (const recv of theyHave.slice(0, expanded ? 5 : 3)) {
+              const otherAfter = (other.byPos[needPos] || []).filter(x => x.id !== recv.id && x.v > 50);
+              if (otherAfter.length < starterCount(needPos)) continue;
               const diff = recv.v - giveVal;
-              const pct = Math.abs(diff) / Math.max(giveVal, recv.v, 1);
-              if (pct > (expanded ? 0.40 : 0.35)) continue;
-              const key = `clear|${g1.id}|${g2.id}|${recv.id}|${other.rosterId}`;
+              const pct  = Math.abs(diff) / Math.max(giveVal, recv.v, 1);
+              if (pct > (expanded ? 0.50 : 0.40)) continue;
+              const key  = `clear|${g1.id}|${g2.id}|${recv.id}|${other.rosterId}`;
               if (!seen.has(key)) {
                 seen.add(key);
                 proposals.push({
