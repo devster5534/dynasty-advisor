@@ -338,11 +338,22 @@
     </div>
   </div>
 
+  <!-- Team picker -->
+  <div id="teamScreen" class="league-wrap hidden">
+    <div class="card">
+      <div class="card-title">Which team is yours?</div>
+      <div id="teamList"></div>
+    </div>
+  </div>
+
   <!-- Dashboard -->
   <div id="dashboard" class="hidden">
 
     <div class="card" id="overviewCard">
-      <div class="card-title">Team Overview</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+        <div class="card-title" style="margin-bottom:0;">Team Overview</div>
+        <button class="btn btn-sm" onclick="pickTeam()" style="font-size:11px;">Wrong team?</button>
+      </div>
       <div class="overview-grid" id="overviewGrid"></div>
     </div>
 
@@ -391,6 +402,10 @@ const CACHE = {
   values:   { key: 'da_fc_values_v3',      ttl:  3600000 },
   username: { key: 'da_username_v1',       ttl: Infinity },
 };
+
+function savedRosterKey(leagueId) { return 'da_roster_' + leagueId; }
+function getSavedRoster(leagueId) { return localStorage.getItem(savedRosterKey(leagueId)); }
+function saveRoster(leagueId, rosterId) { localStorage.setItem(savedRosterKey(leagueId), String(rosterId)); }
 
 // ---- State ----
 const S = {
@@ -592,23 +607,39 @@ async function doLoadLeague(league) {
     S.values   = buildValuesMap(fcRaw);
     S.hasValues = Object.keys(S.values).length > 0;
 
-    // Find my roster
-    const myUser = (users || []).find(u =>
-      (u.display_name || '').toLowerCase() === S.username.toLowerCase() ||
-      u.user_id === S.userId
-    );
-    if (myUser) {
-      const myR = (rosters || []).find(r => r.owner_id === myUser.user_id);
-      S.myRosterId = myR ? myR.roster_id : null;
+    // Check for a saved team choice first
+    const savedRosterId = getSavedRoster(league.league_id);
+    if (savedRosterId) {
+      const found = (rosters || []).find(r => String(r.roster_id) === savedRosterId);
+      S.myRosterId = found ? found.roster_id : null;
     }
+
+    // Auto-detect if no saved choice
     if (!S.myRosterId) {
-      const myR = (rosters || []).find(r => r.owner_id === S.userId);
-      S.myRosterId = myR ? myR.roster_id : null;
+      const myUser = (users || []).find(u =>
+        (u.display_name || '').toLowerCase() === S.username.toLowerCase() ||
+        u.user_id === S.userId
+      );
+      if (myUser) {
+        const myR = (rosters || []).find(r => r.owner_id === myUser.user_id);
+        S.myRosterId = myR ? myR.roster_id : null;
+      }
+      if (!S.myRosterId) {
+        const myR = (rosters || []).find(r => r.owner_id === S.userId);
+        S.myRosterId = myR ? myR.roster_id : null;
+      }
     }
 
     hide('loadingScreen');
-    renderDashboard();
-    show('dashboard');
+
+    // If still can't find the team, show team picker instead of broken dashboard
+    if (!S.myRosterId) {
+      renderTeamPicker();
+      show('teamScreen');
+    } else {
+      renderDashboard();
+      show('dashboard');
+    }
   } catch (e) {
     hide('loadingScreen');
     $('dashboard').innerHTML = `<div class="err">Failed to load league data: ${e.message}</div>`;
@@ -633,6 +664,48 @@ function renderLeagueList() {
     const el = e.target.closest('[data-idx]');
     if (el) doLoadLeague(S.leagues[+el.dataset.idx]);
   });
+}
+
+// ---- Team picker ----
+function pickTeam() {
+  hide('dashboard');
+  renderTeamPicker();
+  show('teamScreen');
+}
+
+function renderTeamPicker() {
+  const userMap = {};
+  for (const u of S.users) {
+    userMap[u.user_id] = (u.metadata && u.metadata.team_name) || u.display_name || ('Team ' + u.user_id.slice(-4));
+  }
+
+  const list = $('teamList');
+  list.innerHTML = S.rosters.map(r => {
+    const name    = userMap[r.owner_id] || ('Roster ' + r.roster_id);
+    const count   = ((r.players || []).length + (r.taxi || []).length);
+    const wins    = r.settings ? (r.settings.wins || 0) : 0;
+    const losses  = r.settings ? (r.settings.losses || 0) : 0;
+    return `<div class="league-opt" data-rid="${r.roster_id}">
+      <div>
+        <div class="league-opt-name">${name}</div>
+        <div class="league-opt-meta">${count} players · ${wins}–${losses}</div>
+      </div>
+      <div class="league-opt-arrow">›</div>
+    </div>`;
+  }).join('');
+
+  list.addEventListener('click', e => {
+    const el = e.target.closest('[data-rid]');
+    if (el) selectMyTeam(+el.dataset.rid);
+  });
+}
+
+function selectMyTeam(rosterId) {
+  saveRoster(S.league.league_id, rosterId);
+  S.myRosterId = rosterId;
+  hide('teamScreen');
+  renderDashboard();
+  show('dashboard');
 }
 
 // ---- Analysis ----
@@ -854,7 +927,7 @@ function pathActions(myTeam, posAvg, hasTrades) {
 // ---- Render ----
 function renderDashboard() {
   if (!S.myRosterId) {
-    $('overviewCard').innerHTML = `<div class="err">Could not find your roster in this league. Your Sleeper display name may differ from your username. Try switching leagues or check your Sleeper account settings.</div>`;
+    pickTeam();
     return;
   }
   if (!S.hasValues) show('noValNotice');
