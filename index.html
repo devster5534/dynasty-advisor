@@ -476,8 +476,8 @@ const DP_URL = 'https://raw.githubusercontent.com/dynastyprocess/data/master/fil
 let G_tradeProfiles  = {};
 let G_teamPicks      = {};
 let G_posTradeFreq   = { QB:0, RB:0, WR:0, TE:0, total:0 };
-let G_tradePools        = { depth: [], young: [], vet: [], top: [] };
-let G_tabDisplayLimits  = { depth: 5, young: 5, vet: 5, top: 5 }; // grows when user clicks "Load more"
+let G_tradePools        = { depth: [], young: [], vet: [], top: [], clear: [] };
+let G_tabDisplayLimits  = { depth: 5, young: 5, vet: 5, top: 5, clear: 5 };
 let G_tradeCtx          = null; // { teams, posAvg, traj } — kept for dismiss re-render
 let G_dismissed         = new Set(); // persisted to localStorage; survives refresh
 let G_transactions     = []; // full season transaction history (all weeks)
@@ -490,6 +490,7 @@ const TRADE_TABS = [
   { key: 'young', label: 'Gain Young Value / Picks',  desc: 'Trade for players under 25 or future picks — build for the future.' },
   { key: 'vet',   label: 'Add Vets',                  desc: 'Win-now moves targeting proven, prime-age producers.' },
   { key: 'top',   label: 'Go for Top Dynasty Assets', desc: 'Aggressive pushes for elite dynasty value.' },
+  { key: 'clear', label: 'Clear Roster Spots',        desc: 'Send 2 players to get 1 back — frees a roster spot for a waiver or FA pickup.' },
 ];
 
 function savedRosterKey(leagueId)  { return 'da_roster_'  + leagueId; }
@@ -1220,7 +1221,7 @@ function calcSurplus(team, posAvg) {
   return out;
 }
 
-function findTrades(analysis, traj) {
+function findTrades(analysis, traj, expanded = false) {
   const { teams, posAvg, myTeam } = analysis;
   if (!myTeam) return [];
 
@@ -1262,14 +1263,14 @@ function findTrades(analysis, traj) {
         if (!myGive.length || !theyHave.length) continue;
 
         // 1:1 swaps — depth check per specific player
-        for (const g of myGive.slice(0, 8)) {
+        for (const g of myGive.slice(0, expanded ? 12 : 8)) {
           if (!hasViableDepthAfterTrade(myTeam, givePos, [g.id], posAvg)) continue;
-          for (const r of theyHave.slice(0, 8)) {
+          for (const r of theyHave.slice(0, expanded ? 12 : 8)) {
             if (!hasViableDepthAfterTrade(other, needPos, [r.id], posAvg)) continue;
             const diff = r.v - g.v;
             const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
             // Skip if the other manager is losing >35% value — they won't accept
-            if (diff > 0 && pct > 0.35) continue;
+            if (diff > 0 && pct > (expanded ? 0.40 : 0.35)) continue;
             const key  = [g.id, r.id].sort().join('|');
             if (!seen.has(key)) {
               seen.add(key);
@@ -1282,19 +1283,19 @@ function findTrades(analysis, traj) {
         // 2:1 — I give 2, receive 1 upgrade + a low pick to maintain asset count
         const balPick2 = cheapPickFrom(other.rosterId);
         const balPickObj2 = makeBalPick(balPick2, other.rosterId, other.ownerName);
-        for (const r of theyHave.slice(0, 5)) {
+        for (const r of theyHave.slice(0, expanded ? 8 : 5)) {
           if (r.v < 500) continue;
           if (!hasViableDepthAfterTrade(other, needPos, [r.id], posAvg)) continue;
           const recvAssets = balPickObj2 ? [r, balPickObj2] : [r];
           const rv = r.v + (balPickObj2 ? balPickObj2.v : 0);
-          for (let i = 0; i < Math.min(myGive.length - 1, 5); i++) {
-            for (let j = i + 1; j < Math.min(myGive.length, 6); j++) {
+          for (let i = 0; i < Math.min(myGive.length - 1, expanded ? 7 : 5); i++) {
+            for (let j = i + 1; j < Math.min(myGive.length, expanded ? 8 : 6); j++) {
               const g1 = myGive[i], g2 = myGive[j];
               if (!hasViableDepthAfterTrade(myTeam, givePos, [g1.id, g2.id], posAvg)) continue;
               const gv   = g1.v + g2.v;
               const diff = rv - gv;
               const pct  = Math.abs(diff) / Math.max(gv, rv, 1);
-              if (pct <= 0.30) {
+              if (pct <= (expanded ? 0.40 : 0.30)) {
                 const key = [g1.id, g2.id, r.id].sort().join('|');
                 if (!seen.has(key)) {
                   seen.add(key);
@@ -1321,11 +1322,11 @@ function findTrades(analysis, traj) {
     group.sort((a, b) => a.pct - b.pct);
     out.push(...group.slice(0, 2));
   }
-  return out.sort((a, b) => a.pct - b.pct).slice(0, 24);
+  return out.sort((a, b) => a.pct - b.pct).slice(0, expanded ? 36 : 24);
 }
 
 // Generates proposals where I send a player and receive a future pick
-function findPickTrades(analysis) {
+function findPickTrades(analysis, expanded = false) {
   const { teams, posAvg, myTeam } = analysis;
   if (!myTeam) return [];
 
@@ -1338,8 +1339,8 @@ function findPickTrades(analysis) {
   // In SF leagues, QB is the most valuable dynasty asset — never suggest selling a QB for picks
   const sellPool = TRADEABLE.flatMap(pos => {
     if (isSF && pos === 'QB') return [];
-    return (myTeam.byPos[pos] || []).filter(x => x.v > 400).slice(0, 5).map(x => ({ ...x, givePos: pos }));
-  }).sort((a, b) => b.v - a.v).slice(0, 10);
+    return (myTeam.byPos[pos] || []).filter(x => x.v > 400).slice(0, expanded ? 8 : 5).map(x => ({ ...x, givePos: pos }));
+  }).sort((a, b) => b.v - a.v).slice(0, expanded ? 15 : 10);
 
   for (const player of sellPool) {
     if (!hasViableDepthAfterTrade(myTeam, player.givePos, [player.id], posAvg)) continue;
@@ -1355,7 +1356,7 @@ function findPickTrades(analysis) {
         .sort((a, b) => b.value - a.value);
 
       const ordinal = n => ['','1st','2nd','3rd','4th','5th'][n] || n+'th';
-      for (const pick of theirPicks.slice(0, 3)) {
+      for (const pick of theirPicks.slice(0, expanded ? 5 : 3)) {
         // Realism: don't suggest a pick worth much more than the player — the other manager won't overpay
         if (pick.value > player.v * 1.30) continue;
         // Don't suggest giving up a player worth much more than the pick — you'd be underselling
@@ -1395,11 +1396,11 @@ function findPickTrades(analysis) {
     }
   }
 
-  return proposals.sort((a, b) => a.pct - b.pct).slice(0, 12);
+  return proposals.sort((a, b) => a.pct - b.pct).slice(0, expanded ? 18 : 12);
 }
 
 // Generates proposals where I send an aging player + one of my own picks to get a young player back
-function findDumpTrades(analysis) {
+function findDumpTrades(analysis, expanded = false) {
   const { teams, posAvg, myTeam } = analysis;
   if (!myTeam) return [];
 
@@ -1426,7 +1427,7 @@ function findDumpTrades(analysis) {
       .filter(x => (x.p.age || 0) >= 30 && x.v < posAvg[pos] * 0.85 && x.v > 200);
 
     for (const dumpPlayer of dumpCandidates) {
-      for (const pick of myPicks.slice(0, 2)) {
+      for (const pick of myPicks.slice(0, expanded ? 4 : 2)) {
         const pickObj = {
           id:        `myp|${dumpPlayer.id}|${pick.season}|${pick.round}`,
           p:         { position: 'PICK' },
@@ -1451,7 +1452,7 @@ function findDumpTrades(analysis) {
             if (myRatioAt(needPos) >= 1.0) continue;
 
             const theyHave = (other.byPos[needPos] || []).filter(x => {
-              const lo = totalGiveVal * 0.55, hi = totalGiveVal * 1.15;
+              const lo = totalGiveVal * 0.55, hi = totalGiveVal * (expanded ? 1.30 : 1.15);
               return x.v >= lo && x.v <= hi && x.v > 300 && (x.p.age || 99) < 28;
             });
 
@@ -1497,7 +1498,71 @@ function findDumpTrades(analysis) {
     }
   }
 
-  return proposals.sort((a, b) => a.pct - b.pct).slice(0, 8);
+  return proposals.sort((a, b) => a.pct - b.pct).slice(0, expanded ? 12 : 8);
+}
+
+// Generates proposals where I send 2 players to get 1 back, freeing a roster spot for a waiver pickup
+function findClearRosterTrades(analysis, expanded = false) {
+  const { teams, posAvg, myTeam } = analysis;
+  if (!myTeam) return [];
+
+  const proposals = [];
+  const seen      = new Set();
+
+  for (const pos of ['RB', 'WR', 'TE', 'QB']) {
+    const myAtPos = (myTeam.byPos[pos] || []).filter(x => x.v > 100);
+    if (myAtPos.length < 3) continue; // need at least 3 to send 2 and keep 1
+    const myRatioAtPos = positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
+    if (myRatioAtPos < 1.1) continue; // only offer from positions I'm actually stacked at
+
+    for (let i = 0; i < Math.min(myAtPos.length - 1, expanded ? 7 : 5); i++) {
+      for (let j = i + 1; j < Math.min(myAtPos.length, expanded ? 8 : 6); j++) {
+        const g1 = myAtPos[i], g2 = myAtPos[j];
+        if (!hasViableDepthAfterTrade(myTeam, pos, [g1.id, g2.id], posAvg)) continue;
+        const giveVal = g1.v + g2.v;
+
+        for (const other of teams) {
+          if (other.isMe) continue;
+
+          for (const needPos of ['QB', 'RB', 'WR', 'TE']) {
+            // Don't request players at a position I'm already stacked at
+            const myNeedRatio = positionTotal(myTeam.byPos[needPos] || []) / Math.max(posAvg[needPos], 1);
+            if (myNeedRatio > 1.15) continue;
+
+            const theyHave = (other.byPos[needPos] || []).filter(x => {
+              const lo = giveVal * 0.55, hi = giveVal * (expanded ? 1.15 : 1.05);
+              return x.v >= lo && x.v <= hi && x.v > 200;
+            });
+
+            for (const recv of theyHave.slice(0, expanded ? 4 : 2)) {
+              if (!hasViableDepthAfterTrade(other, needPos, [recv.id], posAvg)) continue;
+              const diff = recv.v - giveVal;
+              const pct = Math.abs(diff) / Math.max(giveVal, recv.v, 1);
+              if (pct > (expanded ? 0.40 : 0.35)) continue;
+              const key = `clear|${g1.id}|${g2.id}|${recv.id}|${other.rosterId}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                proposals.push({
+                  partner:      other.ownerName,
+                  partnerId:    other.rosterId,
+                  give:         [g1, g2],
+                  recv:         [recv],
+                  givePos:      pos,
+                  recvPos:      needPos,
+                  diff,
+                  pct,
+                  isClearTrade: true,
+                  _id:          key,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return proposals.sort((a, b) => a.pct - b.pct).slice(0, expanded ? 12 : 8);
 }
 
 // ---- Trajectory ----
@@ -1597,7 +1662,8 @@ function renderDashboard() {
   const trades      = findTrades(analysis, traj);
   const pickTrades  = findPickTrades(analysis);
   const dumpTrades  = findDumpTrades(analysis);
-  const allTrades   = [...trades, ...pickTrades, ...dumpTrades];
+  const clearTrades = findClearRosterTrades(analysis);
+  const allTrades   = [...trades, ...pickTrades, ...dumpTrades, ...clearTrades];
 
   // Overview
   const leagueAvgVal = teams.reduce((s, t) => s + t.totalVal, 0) / total;
@@ -1718,6 +1784,7 @@ function renderDraftPicks() {
 }
 
 function classifyTrade(t, posAvg) {
+  if (t.isClearTrade) return 'clear';
   if (t.isPickTrade) return 'young';
   if (t.isDumpTrade) return 'young'; // converting aging asset into younger player
   const recvMaxVal = Math.max(...t.recv.map(x => x.v));
@@ -1803,6 +1870,12 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
     finalYouWhy = `${pname(dumpPlayer.p)} (age ${dumpPlayer.p.age || '?'}) has limited dynasty upside — attaching your ${attachedPick.pickLabel} bridges the value gap to acquire ${pname(recvPlayer.p)} (age ${recvPlayer.p.age || '?'})${recvPick ? ' plus their ' + recvPick.pickLabel : ''}. You convert an aging asset into younger value${recvPick ? ' and maintain your roster size' : ''}.`;
     finalTheyWhy = `${t.partner} needs ${t.givePos} depth and gets a veteran contributor plus a pick to stash. They give up depth at ${t.recvPos}${recvPick ? ' and their ' + recvPick.pickLabel : ''} — a position they can afford to thin. The sweetener makes this worth the move.`;
   }
+  if (t.isClearTrade) {
+    const [g1, g2] = t.give;
+    const recvPlayer = t.recv[0];
+    finalYouWhy = `Consolidating ${pname(g1.p)} + ${pname(g2.p)} into one player frees a roster spot you can fill off waivers or FA. You're stacked at ${t.givePos} — converting depth into a single better asset at ${t.recvPos} is the right move. Net value: ${diff >= 0 ? '+' : ''}${diff.toLocaleString()} pts.`;
+    finalTheyWhy = `${t.partner} receives two ${t.givePos}s for the price of one — more depth at a position they can absorb. They give up ${pname(recvPlayer.p)} at ${t.recvPos}, a spot they can afford to thin. Getting 2:1 value is a compelling reason to accept.`;
+  }
 
   // Rejection history warning
   const pastRejections = (G_rejectedProposals[t.partnerId] || []);
@@ -1887,18 +1960,14 @@ function rerenderTabPane(tabKey) {
   const tb   = TRADE_TABS.find(t => t.key === tabKey);
   const pane = document.getElementById('trade-tab-' + tabKey);
   if (!tb || !pane) return;
-  const pool   = G_tradePools[tabKey];
-  const all    = applyTabFilter(pool, tabKey);
-  const limit  = G_tabDisplayLimits[tabKey] || DISPLAY_PER_TAB;
-  const list   = all.slice(0, limit);
-  const remaining = all.length - list.length;
-  const cards  = list.length
+  const all   = applyTabFilter(G_tradePools[tabKey], tabKey);
+  const limit = G_tabDisplayLimits[tabKey] || DISPLAY_PER_TAB;
+  const list  = all.slice(0, limit);
+  const cards = list.length
     ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tabKey)).join('')
     : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No more proposals in this category — check the other tabs or refresh data after roster moves settle.</p>`;
-  const moreBtn = remaining > 0
-    ? `<button class="load-more-btn" onclick="loadMoreTrades('${tabKey}')">Load ${Math.min(remaining, DISPLAY_PER_TAB)} more proposals (${remaining} remaining)</button>`
-    : '';
-  pane.innerHTML = `<p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>${cards}${moreBtn}`;
+  const moreBtn = `<button class="load-more-btn" style="margin-top:0;margin-bottom:14px;" onclick="loadMoreTrades('${tabKey}')">Generate more proposals</button>`;
+  pane.innerHTML = `<p style="font-size:12px;color:var(--muted);margin:0 0 8px;">${tb.desc}</p>${moreBtn}${cards}`;
   // Update tab count badge — shows total available (including reserve)
   const btn = document.querySelector(`#tradesContent .tab-btn[data-tab="${tabKey}"]`);
   if (btn) {
@@ -1910,6 +1979,31 @@ function rerenderTabPane(tabKey) {
 }
 
 function loadMoreTrades(tabKey) {
+  if (!G_tradeCtx) return;
+  const { traj } = G_tradeCtx;
+  const analysis = analyzeAll();
+  const { posAvg } = analysis;
+
+  // Everything already in the pool (shown or reserve) + everything dismissed = all known IDs
+  const knownIds = new Set([
+    ...G_tradePools[tabKey].map(t => t._id),
+    ...G_dismissed,
+  ]);
+
+  // Run expanded pass with looser thresholds across all generators
+  const expanded = [
+    ...findTrades(analysis, traj, true),
+    ...findPickTrades(analysis, true),
+    ...findDumpTrades(analysis, true),
+    ...findClearRosterTrades(analysis, true),
+  ];
+
+  const newTrades = expanded.filter(t =>
+    classifyTrade(t, posAvg) === tabKey &&
+    !knownIds.has(t._id)
+  );
+
+  G_tradePools[tabKey].push(...newTrades);
   G_tabDisplayLimits[tabKey] = (G_tabDisplayLimits[tabKey] || DISPLAY_PER_TAB) + DISPLAY_PER_TAB;
   rerenderTabPane(tabKey);
 }
@@ -1950,7 +2044,7 @@ function renderTrades(trades, traj) {
 
   // Load persisted dismissals; filter them out before populating pools
   G_dismissed = loadDismissed();
-  G_tradePools = { depth: [], young: [], vet: [], top: [] };
+  G_tradePools = { depth: [], young: [], vet: [], top: [], clear: [] };
   for (const t of trades) {
     if (!G_dismissed.has(t._id)) G_tradePools[classifyTrade(t, posAvg)].push(t);
   }
@@ -1969,7 +2063,7 @@ function renderTrades(trades, traj) {
   }
 
   // Reset per-tab display limits on fresh render
-  G_tabDisplayLimits = { depth: DISPLAY_PER_TAB, young: DISPLAY_PER_TAB, vet: DISPLAY_PER_TAB, top: DISPLAY_PER_TAB };
+  G_tabDisplayLimits = { depth: DISPLAY_PER_TAB, young: DISPLAY_PER_TAB, vet: DISPLAY_PER_TAB, top: DISPLAY_PER_TAB, clear: DISPLAY_PER_TAB };
 
   const firstKey = (TRADE_TABS.find(tb => G_tradePools[tb.key].length > 0) || TRADE_TABS[0]).key;
 
@@ -1981,19 +2075,16 @@ function renderTrades(trades, traj) {
   }).join('');
 
   const tabPanes = TRADE_TABS.map(tb => {
-    const all       = applyTabFilter(G_tradePools[tb.key], tb.key);
-    const limit     = G_tabDisplayLimits[tb.key] || DISPLAY_PER_TAB;
-    const list      = all.slice(0, limit);
-    const remaining = all.length - list.length;
-    const cards     = list.length
+    const all   = applyTabFilter(G_tradePools[tb.key], tb.key);
+    const limit = G_tabDisplayLimits[tb.key] || DISPLAY_PER_TAB;
+    const list  = all.slice(0, limit);
+    const cards = list.length
       ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tb.key)).join('')
       : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No trades in this category right now — check the other tabs or refresh data after roster moves settle.</p>`;
-    const moreBtn = remaining > 0
-      ? `<button class="load-more-btn" onclick="loadMoreTrades('${tb.key}')">Load ${Math.min(remaining, DISPLAY_PER_TAB)} more proposals (${remaining} remaining)</button>`
-      : '';
+    const moreBtn = `<button class="load-more-btn" style="margin-top:0;margin-bottom:14px;" onclick="loadMoreTrades('${tb.key}')">Generate more proposals</button>`;
     return `<div class="tab-pane${tb.key !== firstKey ? ' hidden' : ''}" id="trade-tab-${tb.key}">
-      <p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>
-      ${cards}${moreBtn}
+      <p style="font-size:12px;color:var(--muted);margin:0 0 8px;">${tb.desc}</p>
+      ${moreBtn}${cards}
     </div>`;
   }).join('');
 
@@ -2049,7 +2140,8 @@ function resetDismissed() {
     const trades    = findTrades(analysis, traj);
     const pickTrades = findPickTrades(analysis);
     const dumpTrades = findDumpTrades(analysis);
-    const allTrades  = [...trades, ...pickTrades, ...dumpTrades];
+    const clearTrades = findClearRosterTrades(analysis);
+    const allTrades  = [...trades, ...pickTrades, ...dumpTrades, ...clearTrades];
     renderTrades(allTrades, traj);
   }
 }
