@@ -1001,6 +1001,11 @@ function findTrades(analysis) {
   const myStrengths = posByRatio.slice(0, 2); // top 2 relative positions
   const myNeeds     = posByRatio.slice(2);    // bottom 2 relative positions
 
+  console.log('[DA] findTrades | hasValues:', S.hasValues, '| valuesCount:', Object.keys(S.values).length);
+  console.log('[DA] posAvg:', JSON.stringify(posAvg));
+  console.log('[DA] myRatios:', Object.fromEntries(['QB','RB','WR','TE'].map(p => [p, myRatio(p).toFixed(2)])));
+  console.log('[DA] myStrengths:', myStrengths, '| myNeeds:', myNeeds);
+
   const proposals = [];
   const seen = new Set();
 
@@ -1014,37 +1019,36 @@ function findTrades(analysis) {
 
         const myGive   = (myTeam.byPos[strengthPos] || []).filter(x => x.v > 100);
         const theyHave = (other.byPos[needPos]       || []).filter(x => x.v > 100);
+        console.log(`[DA] ${other.ownerName} | ${strengthPos}->${needPos} | myGive:${myGive.length} theyHave:${theyHave.length}`);
         if (!myGive.length || !theyHave.length) continue;
 
-        // 1:1 swaps
+        // 1:1 swaps — no value threshold, rank by closeness
         for (const g of myGive.slice(0, 5)) {
           for (const r of theyHave.slice(0, 5)) {
             const diff = r.v - g.v;
             const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
-            if (pct <= 0.30) {
-              const key = [g.id, r.id].sort().join('|');
-              if (!seen.has(key)) {
-                seen.add(key);
-                proposals.push({ partner: other.ownerName, give: [g], recv: [r], givePos: strengthPos, recvPos: needPos, diff });
-              }
+            const key = [g.id, r.id].sort().join('|');
+            if (!seen.has(key)) {
+              seen.add(key);
+              proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct });
             }
           }
         }
 
         // 2:1 — I give 2, I receive 1 (to get an upgrade)
         for (const r of theyHave.slice(0, 3)) {
-          if (r.v < 800) continue;
+          if (r.v < 500) continue;
           for (let i = 0; i < Math.min(myGive.length - 1, 4); i++) {
             for (let j = i + 1; j < Math.min(myGive.length, 5); j++) {
               const g1 = myGive[i], g2 = myGive[j];
               const gv = g1.v + g2.v;
               const diff = r.v - gv;
               const pct  = Math.abs(diff) / Math.max(gv, r.v, 1);
-              if (pct <= 0.16) {
+              if (pct <= 0.25) {
                 const key = [g1.id, g2.id, r.id].sort().join('|');
                 if (!seen.has(key)) {
                   seen.add(key);
-                  proposals.push({ partner: other.ownerName, give: [g1, g2], recv: [r], givePos: strengthPos, recvPos: needPos, diff });
+                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos: strengthPos, recvPos: needPos, diff, pct });
                 }
               }
             }
@@ -1054,8 +1058,11 @@ function findTrades(analysis) {
     }
   }
 
+  console.log('[DA] proposals before filter:', proposals.length);
+
+  // Show all 1:1 swaps (sorted by value closeness), cap at 10
   return proposals
-    .sort((a, b) => Math.abs(a.diff) - Math.abs(b.diff))
+    .sort((a, b) => a.pct - b.pct)
     .slice(0, 10);
 }
 
@@ -1278,7 +1285,11 @@ function renderTrades(trades) {
     return;
   }
   if (!trades.length) {
-    $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">No clear win-win player swaps found right now. Your roster may be well-balanced at each position, or value gaps between available players are too wide. Check back after waiver moves settle, or try offering picks (shown above) to sweeten a proposal.</p>`;
+    const analysis = analyzeAll();
+    const { posAvg, myTeam } = analysis;
+    const myRatio = pos => positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
+    const ratioInfo = ['QB','RB','WR','TE'].map(p => `${p}: ${(myRatio(p)*100).toFixed(0)}%`).join(' | ');
+    $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">No trades generated. Position ratios vs. league avg: ${ratioInfo}. Values loaded: ${Object.keys(S.values).length}. Check browser console (F12 → Console) for details.</p>`;
     return;
   }
 
