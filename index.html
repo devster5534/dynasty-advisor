@@ -1060,10 +1060,15 @@ function findTrades(analysis) {
 
   console.log('[DA] proposals before filter:', proposals.length);
 
-  // Show all 1:1 swaps (sorted by value closeness), cap at 10
-  return proposals
+  // Per (partner, givePos, recvPos) keep only the best match; then sort by closeness, cap at 8
+  const best = new Map();
+  for (const p of proposals) {
+    const gk = `${p.partnerId}|${p.givePos}|${p.recvPos}|${p.give.length}`;
+    if (!best.has(gk) || p.pct < best.get(gk).pct) best.set(gk, p);
+  }
+  return [...best.values()]
     .sort((a, b) => a.pct - b.pct)
-    .slice(0, 10);
+    .slice(0, 8);
 }
 
 // ---- Trajectory ----
@@ -1293,6 +1298,8 @@ function renderTrades(trades) {
     return;
   }
 
+  const { teams, posAvg } = analyzeAll();
+
   $('tradesContent').innerHTML = trades.map(t => {
     const giveVal = t.give.reduce((s, x) => s + x.v, 0);
     const recvVal = t.recv.reduce((s, x) => s + x.v, 0);
@@ -1306,17 +1313,28 @@ function renderTrades(trades) {
     const profLabel = tradeProfileLabel(profile);
     const profTag   = `<span class="partner-tag ${profLabel.cls}">${profLabel.label}</span>`;
 
-    // Trade history context
-    let historyNote = '';
+    // Position ratios for both sides
+    const otherTeam = teams.find(t2 => t2.rosterId === t.partnerId);
+    const myTeam    = teams.find(t2 => t2.isMe);
+    const ratio = (team, pos) => team ? positionTotal(team.byPos[pos] || []) / Math.max(posAvg[pos], 1) : 1;
+
+    const myGivePosRatio    = (ratio(myTeam,    t.givePos) * 100).toFixed(0);
+    const myRecvPosRatio    = (ratio(myTeam,    t.recvPos) * 100).toFixed(0);
+    const theirGivePosRatio = (ratio(otherTeam, t.recvPos) * 100).toFixed(0); // they give recvPos
+    const theirNeedRatio    = (ratio(otherTeam, t.givePos) * 100).toFixed(0); // they need givePos
+
+    // Why you accept
+    const sign = diff >= 0 ? '+' : '';
+    const youAcceptWhy = `You're ${myGivePosRatio}% of league avg at ${t.givePos} (a relative strength) and only ${myRecvPosRatio}% at ${t.recvPos} (your biggest need). This trade addresses your weakest spot without gutting a stronger one. Net value: ${sign}${diff.toLocaleString()} pts.`;
+
+    // Why they accept
+    let theyAcceptWhy = `${t.partner} is at ${theirGivePosRatio}% of league avg at ${t.recvPos} — they have depth there and can afford to deal. In return they get ${t.givePos} help where they're at ${theirNeedRatio}% of avg.`;
     if (profile && profile.count > 0) {
       const theyBuyPos = ['QB','RB','WR','TE'].filter(pos => {
-        const received = (profile.playersReceived || []).filter(id => {
-          const p = playerInfo(id); return p.position === pos;
-        });
-        return received.length >= 2;
+        return (profile.playersReceived || []).filter(id => playerInfo(id).position === pos).length >= 2;
       });
-      if (theyBuyPos.length) historyNote = ` This team has historically acquired ${theyBuyPos.join('/')} in trades — they're likely receptive to this.`;
-      else if (profile.picksReceived > profile.picksSent) historyNote = ' This team tends to receive picks in trades — consider adding a pick to make the offer more attractive.';
+      if (theyBuyPos.length) theyAcceptWhy += ` Trade history shows they actively acquire ${theyBuyPos.join('/')} — this fits their pattern.`;
+      else if (profile.picksReceived > profile.picksSent) theyAcceptWhy += ` They tend to receive picks in deals — a pick sweetener could seal it.`;
     }
 
     const giveSide = t.give.map(x => `<div class="trade-player">
@@ -1330,9 +1348,6 @@ function renderTrades(trades) {
       <div class="tp-meta">${x.p.maybeTeam || x.p.team || 'FA'} · ${t.recvPos}${x.p.maybeAge || x.p.age ? ' · Age ' + (x.p.maybeAge || x.p.age) : ''}</div>
       <div class="tp-val">${x.v.toLocaleString()} pts</div>
     </div>`).join('');
-
-    const sign = diff >= 0 ? '+' : '';
-    const why  = `${t.partner} has surplus ${t.recvPos} depth and needs ${t.givePos}. You have the opposite. Net value to you: ${sign}${diff.toLocaleString()} pts.${historyNote}`;
 
     return `<div class="trade-card">
       <div class="trade-hdr">
@@ -1353,7 +1368,8 @@ function renderTrades(trades) {
           ${recvSide}
         </div>
       </div>
-      <div class="trade-why">${why}</div>
+      <div class="trade-why"><strong>Why you accept:</strong> ${youAcceptWhy}</div>
+      <div class="trade-why" style="margin-top:6px;"><strong>Why they accept:</strong> ${theyAcceptWhy}</div>
     </div>`;
   }).join('');
 }
