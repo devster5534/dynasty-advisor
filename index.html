@@ -282,6 +282,10 @@
     .tab-pane.hidden { display: none; }
     .dismiss-btn { float: right; background: none; border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px; font-size: 11px; color: var(--muted); cursor: pointer; margin-left: 8px; }
     .dismiss-btn:hover { border-color: var(--muted); color: var(--navy); }
+    .rejection-warning { font-size: 11px; padding: 7px 10px; margin-bottom: 10px; border-radius: 5px; line-height: 1.5; background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
+    .rejection-warning.muted-warn { background: var(--bg); color: var(--muted); border-color: var(--border); }
+    .load-more-btn { display: block; width: 100%; margin-top: 14px; padding: 10px; background: none; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; cursor: pointer; font-family: inherit; text-align: center; transition: border-color .15s, color .15s; }
+    .load-more-btn:hover { border-color: var(--accent); color: var(--accent); }
 
     /* ---- Path forward ---- */
     .traj-chip {
@@ -471,9 +475,12 @@ const DP_URL = 'https://raw.githubusercontent.com/dynastyprocess/data/master/fil
 let G_tradeProfiles  = {};
 let G_teamPicks      = {};
 let G_posTradeFreq   = { QB:0, RB:0, WR:0, TE:0, total:0 };
-let G_tradePools     = { depth: [], young: [], vet: [], top: [] };
-let G_tradeCtx       = null; // { teams, posAvg, traj } — kept for dismiss re-render
-let G_dismissed      = new Set(); // persisted to localStorage; survives refresh
+let G_tradePools        = { depth: [], young: [], vet: [], top: [] };
+let G_tabDisplayLimits  = { depth: 5, young: 5, vet: 5, top: 5 }; // grows when user clicks "Load more"
+let G_tradeCtx          = null; // { teams, posAvg, traj } — kept for dismiss re-render
+let G_dismissed         = new Set(); // persisted to localStorage; survives refresh
+let G_transactions     = []; // full season transaction history (all weeks)
+let G_rejectedProposals = {}; // { partnerId: [{ givePositions, recvPositions, created }] }
 
 const DISPLAY_PER_TAB = 5; // proposals visible per tab; rest are reserve — dismiss reveals next
 
@@ -738,15 +745,19 @@ async function doLoadLeague(league) {
   try {
     setProgress('Loading rosters, players & trade history...');
     const isSF = (league.roster_positions || []).includes('SUPER_FLEX');
-    const [rosters, users, players, fcRaw, transactions, tradedPicks, dpRaw] = await Promise.all([
+    const txWeeks = Array.from({ length: 18 }, (_, i) =>
+      sleeper('/league/' + league.league_id + '/transactions/' + (i + 1)).catch(() => [])
+    );
+    const [rosters, users, players, fcRaw, txArrays, tradedPicks, dpRaw] = await Promise.all([
       sleeper('/league/' + league.league_id + '/rosters'),
       sleeper('/league/' + league.league_id + '/users'),
       loadNFLPlayers(),
       loadDynastyValues(league),
-      sleeper('/league/' + league.league_id + '/transactions/1').catch(() => []),
+      Promise.all(txWeeks),
       sleeper('/league/' + league.league_id + '/traded_picks').catch(() => []),
       loadDPValues(isSF),
     ]);
+    const transactions = (txArrays || []).flat().filter(Boolean);
 
     S.rosters  = rosters  || [];
     S.users    = users    || [];
@@ -762,9 +773,10 @@ async function doLoadLeague(league) {
     S.hasValues = Object.keys(S.values).length > 0;
 
     // Build trade profiles, pick inventory, and position trade frequency
-    G_tradeProfiles = buildTradeProfiles(transactions || []);
+    G_transactions  = transactions || [];
+    G_tradeProfiles = buildTradeProfiles(G_transactions);
     G_teamPicks     = buildPickInventory(rosters || [], tradedPicks || [], SEASON);
-    G_posTradeFreq  = buildPosTradeFreq(transactions || []);
+    G_posTradeFreq  = buildPosTradeFreq(G_transactions);
 
     // Use saved team choice if we have one for this specific league
     const savedRosterId = getSavedRoster(league.league_id);
@@ -918,6 +930,44 @@ function buildPosTradeFreq(transactions) {
     }
   }
   return freq;
+}
+
+// Parses rejected trade proposals that the user initiated, keyed by the partner's roster ID.
+// Used to surface warnings when a new proposal resembles a previously-rejected one.
+function buildRejectedProposals(transactions, myRosterId) {
+  const result = {}; // { partnerId: [{ givePositions, recvPositions, created }] }
+  if (!myRosterId) return result;
+  for (const txn of transactions) {
+    if (txn.type !== 'trade') continue;
+    if (txn.status !== 'rejected') continue;
+    // Only care about proposals I made
+    const proposer = txn.proposer_roster_id;
+    if (proposer !== myRosterId) continue;
+    // Find the partner (they rejected)
+    const parties   = txn.roster_ids || txn.consenter_roster_ids || txn.consenter_ids || [];
+    const partnerId = parties.find(id => id !== myRosterId);
+    if (!partnerId) continue;
+    const adds = txn.adds || {};
+    const givePositions = [];
+    const recvPositions = [];
+    const giveNames     = [];
+    const recvNames     = [];
+    for (const [playerId, receivingRosterId] of Object.entries(adds)) {
+      const player = S.players[String(playerId)];
+      const pos    = player && player.position;
+      if (!['QB','RB','WR','TE'].includes(pos)) continue;
+      if (receivingRosterId === partnerId) {
+        givePositions.push(pos);
+        giveNames.push(pname(player));
+      } else if (receivingRosterId === myRosterId) {
+        recvPositions.push(pos);
+        recvNames.push(pname(player));
+      }
+    }
+    if (!result[partnerId]) result[partnerId] = [];
+    result[partnerId].push({ givePositions, recvPositions, giveNames, recvNames, created: txn.created });
+  }
+  return result;
 }
 
 // QB needs a much higher bar because QBs often appear as low-value throw-ins
@@ -1747,6 +1797,27 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
     finalTheyWhy = `${t.partner} needs ${t.givePos} depth and gets a veteran contributor plus a pick to stash. They give up depth at ${t.recvPos}${recvPick ? ' and their ' + recvPick.pickLabel : ''} — a position they can afford to thin. The sweetener makes this worth the move.`;
   }
 
+  // Rejection history warning
+  const pastRejections = (G_rejectedProposals[t.partnerId] || []);
+  const similarRejections = pastRejections.filter(r =>
+    r.givePositions.includes(t.givePos) || r.recvPositions.includes(t.recvPos)
+  );
+  const rejectionNote = similarRejections.length > 0
+    ? (() => {
+        const examples = similarRejections.slice(0, 2).map(r => {
+          const gave = r.giveNames.slice(0, 2).join(', ') || r.givePositions.join('/') || '?';
+          const got  = r.recvNames.slice(0, 2).join(', ')  || r.recvPositions.join('/')  || '?';
+          return `${gave} for ${got}`;
+        }).join('; ');
+        return `<div class="rejection-warning">Past rejection: You previously proposed similar deals to ${t.partner} (${examples}) and they declined. Consider adding a sweetener or adjusting the ask.</div>`;
+      })()
+    : (pastRejections.length > 0
+        ? `<div class="rejection-warning muted-warn">Note: ${t.partner} has rejected ${pastRejections.length} of your past proposal${pastRejections.length > 1 ? 's' : ''} — factor that into how you approach this.</div>`
+        : '');
+  if (similarRejections.length > 0) {
+    finalTheyWhy += ` However, you've proposed similar ${t.givePos}→${t.recvPos} trades to them before and they passed — consider sweetening the offer.`;
+  }
+
   const safeId = (t._id || '').replace(/[^a-zA-Z0-9_|]/g, '_');
   return `<div class="trade-card" id="tc-${safeId}">
     <div class="trade-hdr">
@@ -1759,6 +1830,7 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
         <button class="dismiss-btn" onclick="dismissTrade('${t._id}','${bucket || ''}')">✕</button>
       </div>
     </div>
+    ${rejectionNote}
     <div class="trade-flow">
       <div>
         <div class="trade-side-lbl send">You Send</div>
@@ -1808,14 +1880,19 @@ function rerenderTabPane(tabKey) {
   const tb   = TRADE_TABS.find(t => t.key === tabKey);
   const pane = document.getElementById('trade-tab-' + tabKey);
   if (!tb || !pane) return;
-  const pool = G_tradePools[tabKey];
-  const all  = applyTabFilter(pool, tabKey);
-  const list = all.slice(0, DISPLAY_PER_TAB);
-  const content = list.length
+  const pool   = G_tradePools[tabKey];
+  const all    = applyTabFilter(pool, tabKey);
+  const limit  = G_tabDisplayLimits[tabKey] || DISPLAY_PER_TAB;
+  const list   = all.slice(0, limit);
+  const remaining = all.length - list.length;
+  const cards  = list.length
     ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tabKey)).join('')
     : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No more proposals in this category — check the other tabs or refresh data after roster moves settle.</p>`;
-  pane.innerHTML = `<p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>${content}`;
-  // Update tab count badge — shows total available (including reserve beyond displayed limit)
+  const moreBtn = remaining > 0
+    ? `<button class="load-more-btn" onclick="loadMoreTrades('${tabKey}')">Load ${Math.min(remaining, DISPLAY_PER_TAB)} more proposals (${remaining} remaining)</button>`
+    : '';
+  pane.innerHTML = `<p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>${cards}${moreBtn}`;
+  // Update tab count badge — shows total available (including reserve)
   const btn = document.querySelector(`#tradesContent .tab-btn[data-tab="${tabKey}"]`);
   if (btn) {
     const n = all.length;
@@ -1823,6 +1900,11 @@ function rerenderTabPane(tabKey) {
     if (!span && n > 0) { span = document.createElement('span'); span.className = 'tab-count'; btn.appendChild(span); }
     if (span) span.textContent = n > 0 ? n : '';
   }
+}
+
+function loadMoreTrades(tabKey) {
+  G_tabDisplayLimits[tabKey] = (G_tabDisplayLimits[tabKey] || DISPLAY_PER_TAB) + DISPLAY_PER_TAB;
+  rerenderTabPane(tabKey);
 }
 
 const dismissedKey = () => `dynasty_dismissed_${(S.league && S.league.league_id) || 'default'}`;
@@ -1856,12 +1938,31 @@ function renderTrades(trades, traj) {
   const { teams, posAvg } = analyzeAll();
   G_tradeCtx = { teams, posAvg, traj };
 
+  // Build rejection map from full transaction history now that we know who the user is
+  G_rejectedProposals = buildRejectedProposals(G_transactions, S.myRosterId);
+
   // Load persisted dismissals; filter them out before populating pools
   G_dismissed = loadDismissed();
   G_tradePools = { depth: [], young: [], vet: [], top: [] };
   for (const t of trades) {
     if (!G_dismissed.has(t._id)) G_tradePools[classifyTrade(t, posAvg)].push(t);
   }
+
+  // Sort each pool so trades with rejection history float to the back — fresh proposals first
+  const rejectionScore = t => {
+    const rejs = G_rejectedProposals[t.partnerId] || [];
+    if (!rejs.length) return 0;
+    const similar = rejs.filter(r =>
+      r.givePositions.includes(t.givePos) || r.recvPositions.includes(t.recvPos)
+    );
+    return similar.length > 0 ? 2 : 1; // exact position match = heavier penalty
+  };
+  for (const key of Object.keys(G_tradePools)) {
+    G_tradePools[key].sort((a, b) => rejectionScore(a) - rejectionScore(b));
+  }
+
+  // Reset per-tab display limits on fresh render
+  G_tabDisplayLimits = { depth: DISPLAY_PER_TAB, young: DISPLAY_PER_TAB, vet: DISPLAY_PER_TAB, top: DISPLAY_PER_TAB };
 
   const firstKey = (TRADE_TABS.find(tb => G_tradePools[tb.key].length > 0) || TRADE_TABS[0]).key;
 
@@ -1873,14 +1974,19 @@ function renderTrades(trades, traj) {
   }).join('');
 
   const tabPanes = TRADE_TABS.map(tb => {
-    const all  = applyTabFilter(G_tradePools[tb.key], tb.key);
-    const list = all.slice(0, DISPLAY_PER_TAB);
-    const content = list.length
+    const all       = applyTabFilter(G_tradePools[tb.key], tb.key);
+    const limit     = G_tabDisplayLimits[tb.key] || DISPLAY_PER_TAB;
+    const list      = all.slice(0, limit);
+    const remaining = all.length - list.length;
+    const cards     = list.length
       ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tb.key)).join('')
       : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No trades in this category right now — check the other tabs or refresh data after roster moves settle.</p>`;
+    const moreBtn = remaining > 0
+      ? `<button class="load-more-btn" onclick="loadMoreTrades('${tb.key}')">Load ${Math.min(remaining, DISPLAY_PER_TAB)} more proposals (${remaining} remaining)</button>`
+      : '';
     return `<div class="tab-pane${tb.key !== firstKey ? ' hidden' : ''}" id="trade-tab-${tb.key}">
       <p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>
-      ${content}
+      ${cards}${moreBtn}
     </div>`;
   }).join('');
 
