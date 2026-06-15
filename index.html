@@ -602,32 +602,16 @@ async function doLoadLeague(league) {
     S.values   = buildValuesMap(fcRaw);
     S.hasValues = Object.keys(S.values).length > 0;
 
-    // Check for a saved team choice first
+    // Use saved team choice if we have one for this specific league
     const savedRosterId = getSavedRoster(league.league_id);
     if (savedRosterId) {
       const found = (rosters || []).find(r => String(r.roster_id) === savedRosterId);
       S.myRosterId = found ? found.roster_id : null;
     }
 
-    // Auto-detect if no saved choice
-    if (!S.myRosterId) {
-      const myUser = (users || []).find(u =>
-        (u.display_name || '').toLowerCase() === S.username.toLowerCase() ||
-        u.user_id === S.userId
-      );
-      if (myUser) {
-        const myR = (rosters || []).find(r => r.owner_id === myUser.user_id);
-        S.myRosterId = myR ? myR.roster_id : null;
-      }
-      if (!S.myRosterId) {
-        const myR = (rosters || []).find(r => r.owner_id === S.userId);
-        S.myRosterId = myR ? myR.roster_id : null;
-      }
-    }
-
     hide('loadingScreen');
 
-    // If still can't find the team, show team picker instead of broken dashboard
+    // No saved choice — always ask rather than guess
     if (!S.myRosterId) {
       renderTeamPicker();
       show('teamScreen');
@@ -681,6 +665,8 @@ function renderLeagueList() {
 
 // ---- Team picker ----
 function pickTeam() {
+  if (S.league) localStorage.removeItem(savedRosterKey(S.league.league_id));
+  S.myRosterId = null;
   hide('dashboard');
   renderTeamPicker();
   show('teamScreen');
