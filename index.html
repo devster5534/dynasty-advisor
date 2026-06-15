@@ -1352,8 +1352,9 @@ function findDumpTrades(analysis) {
   const seen      = new Set();
 
   // Picks I currently hold and could attach to sweeten a deal
+  // Never attach a 1st round pick to sweeten a dump trade — too valuable to give up for aging player returns
   const myPicks = (G_teamPicks[myTeam.rosterId] || [])
-    .filter(pk => futureSeason(pk.season) && pk.value > 150)
+    .filter(pk => futureSeason(pk.season) && pk.value > 150 && pk.round >= 2)
     .sort((a, b) => b.value - a.value);
 
   if (!myPicks.length) return [];
