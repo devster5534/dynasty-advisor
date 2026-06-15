@@ -289,6 +289,34 @@
       margin-bottom: 14px;
     }
 
+    /* ---- Draft picks ---- */
+    .pick-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+    .pick-row:last-child { border-bottom: none; }
+    .pick-badge {
+      flex-shrink: 0; font-size: 11px; font-weight: 700;
+      padding: 3px 8px; border-radius: 6px;
+      background: var(--accent-light); color: var(--accent);
+      width: 54px; text-align: center;
+    }
+    .pick-badge.first { background: var(--green-light); color: var(--green); }
+    .pick-badge.late  { background: var(--bg); color: var(--muted); }
+    .pick-info { flex: 1; }
+    .pick-name { font-size: 13px; font-weight: 600; }
+    .pick-own  { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .pick-val  { font-size: 12px; color: var(--muted); font-weight: 600; width: 60px; text-align: right; }
+
+    /* ---- Trade profile tag ---- */
+    .partner-tag {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; font-weight: 600;
+      padding: 2px 8px; border-radius: 12px;
+      margin-left: 8px;
+    }
+    .partner-tag.active   { background: var(--green-light); color: var(--green); }
+    .partner-tag.inactive { background: var(--bg); color: var(--muted); }
+    .partner-tag.buyer    { background: var(--accent-light); color: var(--accent); }
+    .partner-tag.seller   { background: var(--yellow-light); color: var(--yellow); }
+
     /* ---- Utility ---- */
     .hidden { display: none !important; }
     @media (max-width: 580px) {
@@ -374,6 +402,11 @@
       <div id="compContent"></div>
     </div>
 
+    <div class="card hidden" id="picksCard">
+      <div class="card-title">Draft Pick Assets</div>
+      <div id="picksContent"></div>
+    </div>
+
     <div class="card" id="tradesCard">
       <div class="card-title">Trade Opportunities</div>
       <div class="card-subtitle">Proactive trades that help both sides — based on your roster gaps and each team's surplus positions.</div>
@@ -403,9 +436,14 @@ const DEFAULT_USER = 'Devster5534';
 
 const CACHE = {
   players:  { key: 'da_nfl_players_v2',   ttl: 86400000 },
-  values:   { key: 'da_fc_values_v3',      ttl:  3600000 },
+  values:   { key: 'da_fc_values_v4',      ttl:  3600000 },
+  dp:       { key: 'da_dp_values_v1',      ttl:  3600000 },
   username: { key: 'da_username_v1',       ttl: Infinity },
 };
+
+const DP_URL = 'https://raw.githubusercontent.com/dynastyprocess/data/master/files/values-players.csv';
+let G_tradeProfiles = {};
+let G_teamPicks     = {};
 
 function savedRosterKey(leagueId) { return 'da_roster_' + leagueId; }
 function getSavedRoster(leagueId) { return localStorage.getItem(savedRosterKey(leagueId)); }
@@ -514,6 +552,58 @@ async function loadDynastyValues(league) {
   return null;
 }
 
+async function loadDPValues(isSF) {
+  let cached = getCache(CACHE.dp);
+  if (cached) return cached;
+  try {
+    const r = await fetch(DP_URL, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return null;
+    const text = await r.text();
+    const data = parseDPCsv(text, isSF);
+    setCache(CACHE.dp, data);
+    return data;
+  } catch { return null; }
+}
+
+function parseDPCsv(text, isSF) {
+  const lines = text.trim().split('\n');
+  const headers = lines[0].split(',').map(h => h.replace(/"/g,'').trim());
+  const nameIdx  = headers.indexOf('player');
+  const val1Idx  = headers.indexOf('value_1qb');
+  const val2Idx  = headers.indexOf('value_2qb');
+  const out = {};
+  for (let i = 1; i < lines.length; i++) {
+    // Simple CSV split — works for this file (no embedded commas in values)
+    const cols = lines[i].split(',');
+    const name = (cols[nameIdx] || '').replace(/"/g,'').trim();
+    const val  = parseFloat(isSF ? cols[val2Idx] : cols[val1Idx]) || 0;
+    if (name) out[normName(name)] = val;
+  }
+  return out;
+}
+
+function normName(n) {
+  return (n || '').toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
+}
+
+function buildNameToIdMap() {
+  const map = {};
+  for (const [id, p] of Object.entries(S.players)) {
+    const n = normName(pname(p));
+    if (n && n !== 'unknown') map[n] = id;
+  }
+  return map;
+}
+
+function mergeDPValues(dpMap, nameMap) {
+  let added = 0;
+  for (const [n, v] of Object.entries(dpMap)) {
+    const id = nameMap[n];
+    if (id && !S.values[id] && v > 0) { S.values[id] = v; added++; }
+  }
+  return added;
+}
+
 function buildValuesMap(fcData) {
   if (!fcData) return {};
   const map = {};
@@ -589,19 +679,34 @@ async function doLoadLeague(league) {
   $('leagueChip').style.display = '';
 
   try {
-    setProgress('Loading rosters & players...');
-    const [rosters, users, players, fcRaw] = await Promise.all([
+    setProgress('Loading rosters, players & trade history...');
+    const isSF = (league.roster_positions || []).includes('SUPER_FLEX');
+    const [rosters, users, players, fcRaw, transactions, tradedPicks, dpRaw] = await Promise.all([
       sleeper('/league/' + league.league_id + '/rosters'),
       sleeper('/league/' + league.league_id + '/users'),
       loadNFLPlayers(),
       loadDynastyValues(league),
+      sleeper('/league/' + league.league_id + '/transactions/1').catch(() => []),
+      sleeper('/league/' + league.league_id + '/traded_picks').catch(() => []),
+      loadDPValues(isSF),
     ]);
 
     S.rosters  = rosters  || [];
     S.users    = users    || [];
     S.players  = players  || {};
     S.values   = buildValuesMap(fcRaw);
+
+    // Fill gaps with DynastyProcess values
+    if (dpRaw) {
+      const nameMap = buildNameToIdMap();
+      mergeDPValues(dpRaw, nameMap);
+    }
+
     S.hasValues = Object.keys(S.values).length > 0;
+
+    // Build trade profiles and pick inventory
+    G_tradeProfiles = buildTradeProfiles(transactions || []);
+    G_teamPicks     = buildPickInventory(rosters || [], tradedPicks || [], SEASON);
 
     // Use saved team choice if we have one for this specific league
     const savedRosterId = getSavedRoster(league.league_id);
@@ -718,6 +823,93 @@ function selectMyTeam(rosterId) {
   hide('teamScreen');
   renderDashboard();
   show('dashboard');
+}
+
+// ---- Trade profiles ----
+function buildTradeProfiles(transactions) {
+  const profiles = {};
+  for (const r of S.rosters) {
+    profiles[r.roster_id] = { count: 0, playersSent: [], playersReceived: [], picksSent: 0, picksReceived: 0 };
+  }
+  for (const txn of transactions) {
+    if (txn.type !== 'trade') continue;
+    const parties = txn.consenter_ids || [];
+    const adds    = txn.adds  || {};
+    const picks   = txn.draft_picks || [];
+    for (const rid of parties) { if (profiles[rid]) profiles[rid].count++; }
+    for (const [playerId, receiverId] of Object.entries(adds)) {
+      if (profiles[receiverId]) profiles[receiverId].playersReceived.push(playerId);
+      const senderId = parties.find(p => p !== receiverId);
+      if (senderId && profiles[senderId]) profiles[senderId].playersSent.push(playerId);
+    }
+    for (const pick of picks) {
+      if (profiles[pick.owner_id])           profiles[pick.owner_id].picksReceived++;
+      if (profiles[pick.previous_owner_id])  profiles[pick.previous_owner_id].picksSent++;
+    }
+  }
+  return profiles;
+}
+
+function tradeProfileLabel(profile) {
+  if (!profile || profile.count === 0) return { label: 'Not trading', cls: 'inactive' };
+  const buys = profile.picksReceived + profile.playersReceived.length;
+  const sells = profile.picksSent + profile.playersSent.length;
+  if (profile.picksReceived > profile.picksSent + 1) return { label: `Buyer · ${profile.count} trades`, cls: 'buyer' };
+  if (profile.picksSent > profile.picksReceived + 1) return { label: `Selling picks · ${profile.count} trades`, cls: 'seller' };
+  return { label: `Active · ${profile.count} trades`, cls: 'active' };
+}
+
+// ---- Draft picks ----
+function pickVal(round, season) {
+  const diff = parseInt(season) - parseInt(SEASON);
+  const yearFactor = Math.pow(0.72, diff);
+  const base = [0, 5500, 3000, 1600, 900, 450][round] || 300;
+  return Math.round(base * yearFactor);
+}
+
+function buildPickInventory(rosters, tradedPicks, currentSeason) {
+  const seasons = [currentSeason, String(+currentSeason+1), String(+currentSeason+2)];
+  const rounds  = [1,2,3,4,5];
+
+  // Start: each team owns their own picks
+  const ownership = {};
+  for (const r of rosters) {
+    for (const s of seasons) for (const rd of rounds) {
+      ownership[`${r.roster_id}_${rd}_${s}`] = r.roster_id;
+    }
+  }
+  // Apply trades
+  for (const pick of tradedPicks) {
+    const key = `${pick.roster_id}_${pick.round}_${pick.season}`;
+    ownership[key] = pick.owner_id;
+  }
+
+  // Build per-team list
+  const teamPicks = {};
+  for (const r of rosters) teamPicks[r.roster_id] = [];
+  for (const [key, ownerId] of Object.entries(ownership)) {
+    const parts = key.split('_');
+    const origRosterId = +parts[0], rd = +parts[1], season = parts[2];
+    if (!seasons.includes(season)) continue;
+    if (teamPicks[ownerId] !== undefined) {
+      teamPicks[ownerId].push({
+        round: rd, season,
+        origRosterId,
+        isOwn: origRosterId === ownerId,
+        value: pickVal(rd, season),
+      });
+    }
+  }
+  for (const list of Object.values(teamPicks)) list.sort((a,b) => b.value - a.value);
+  return teamPicks;
+}
+
+function ownerName(rosterId) {
+  const userMap = {};
+  for (const u of S.users) userMap[u.user_id] = u.display_name;
+  const r = S.rosters.find(r => r.roster_id === rosterId);
+  if (!r) return 'Unknown';
+  return userMap[r.owner_id] || ('Roster ' + rosterId);
 }
 
 // ---- Analysis ----
@@ -984,6 +1176,7 @@ function renderDashboard() {
 
   renderRoster(myTeam);
   renderBars(myTeam, posAvg);
+  renderDraftPicks();
   renderTrades(trades);
   renderPath(myTeam, posAvg, trades, traj);
 }
@@ -1038,13 +1231,43 @@ function renderBars(myTeam, posAvg) {
   $('compContent').innerHTML = html + `<div class="bar-note">Vertical line = league average. Bars extending past it mean you\'re above average at that position.</div>`;
 }
 
+function renderDraftPicks() {
+  const myPicks = (G_teamPicks[S.myRosterId] || []);
+  if (!myPicks.length) { hide('picksCard'); return; }
+
+  const userMap = {};
+  for (const u of S.users) userMap[u.user_id] = u.display_name;
+  const rosterName = rid => {
+    const r = S.rosters.find(r => r.roster_id === rid);
+    return r ? (userMap[r.owner_id] || 'Team ' + rid) : 'Team ' + rid;
+  };
+
+  const rows = myPicks.map(pk => {
+    const suffix = ['','st','nd','rd','th','th'][pk.round] || 'th';
+    const label  = `${pk.round}${suffix} ${pk.season}`;
+    const from   = pk.isOwn ? 'Own pick' : `Via ${rosterName(pk.origRosterId)}`;
+    const cls    = pk.round === 1 ? 'first' : pk.round >= 4 ? 'late' : '';
+    return `<div class="pick-row">
+      <div class="pick-badge ${cls}">${label}</div>
+      <div class="pick-info">
+        <div class="pick-name">${pk.round === 1 ? '1st' : pk.round === 2 ? '2nd' : pk.round === 3 ? '3rd' : pk.round + 'th'} Round · ${pk.season}</div>
+        <div class="pick-own">${from}</div>
+      </div>
+      <div class="pick-val">~${pk.value.toLocaleString()} pts</div>
+    </div>`;
+  }).join('');
+
+  $('picksContent').innerHTML = rows;
+  show('picksCard');
+}
+
 function renderTrades(trades) {
   if (!S.hasValues) {
-    $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">Trade analysis requires dynasty values — unavailable right now. Refresh to try again.</p>`;
+    $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">Dynasty values couldn't load — click Refresh Data to try again.</p>`;
     return;
   }
   if (!trades.length) {
-    $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">No obvious win-win trades identified right now. Your roster may already be well-balanced, or value differences between teams are too large to bridge in a single swap. Try revisiting after roster moves settle.</p>`;
+    $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">No clear win-win player swaps found right now. Your roster may be well-balanced at each position, or value gaps between available players are too wide. Check back after waiver moves settle, or try offering picks (shown above) to sweeten a proposal.</p>`;
     return;
   }
 
@@ -1056,24 +1279,45 @@ function renderTrades(trades) {
     const cls     = absPct < 0.05 ? 'even' : diff > 0 ? 'win' : 'loss';
     const lbl     = absPct < 0.05 ? 'Even Trade' : diff > 0 ? 'You Win' : 'Slight Overpay';
 
+    // Trade profile for this partner
+    const profile   = G_tradeProfiles[t.partnerId] || null;
+    const profLabel = tradeProfileLabel(profile);
+    const profTag   = `<span class="partner-tag ${profLabel.cls}">${profLabel.label}</span>`;
+
+    // Trade history context
+    let historyNote = '';
+    if (profile && profile.count > 0) {
+      const theyBuyPos = ['QB','RB','WR','TE'].filter(pos => {
+        const received = (profile.playersReceived || []).filter(id => {
+          const p = playerInfo(id); return p.position === pos;
+        });
+        return received.length >= 2;
+      });
+      if (theyBuyPos.length) historyNote = ` This team has historically acquired ${theyBuyPos.join('/')} in trades — they're likely receptive to this.`;
+      else if (profile.picksReceived > profile.picksSent) historyNote = ' This team tends to receive picks in trades — consider adding a pick to make the offer more attractive.';
+    }
+
     const giveSide = t.give.map(x => `<div class="trade-player">
       <div class="tp-name">${pname(x.p)}</div>
-      <div class="tp-meta">${x.p.team || 'FA'} · ${t.givePos}${x.p.age ? ' · Age ' + x.p.age : ''}</div>
+      <div class="tp-meta">${x.p.maybeTeam || x.p.team || 'FA'} · ${t.givePos}${x.p.maybeAge || x.p.age ? ' · Age ' + (x.p.maybeAge || x.p.age) : ''}</div>
       <div class="tp-val">${x.v.toLocaleString()} pts</div>
     </div>`).join('');
 
     const recvSide = t.recv.map(x => `<div class="trade-player">
       <div class="tp-name">${pname(x.p)}</div>
-      <div class="tp-meta">${x.p.team || 'FA'} · ${t.recvPos}${x.p.age ? ' · Age ' + x.p.age : ''}</div>
+      <div class="tp-meta">${x.p.maybeTeam || x.p.team || 'FA'} · ${t.recvPos}${x.p.maybeAge || x.p.age ? ' · Age ' + (x.p.maybeAge || x.p.age) : ''}</div>
       <div class="tp-val">${x.v.toLocaleString()} pts</div>
     </div>`).join('');
 
     const sign = diff >= 0 ? '+' : '';
-    const why = `${t.partner} has surplus ${t.recvPos} depth you need. You have surplus ${t.givePos} depth they need. Net value to you: ${sign}${diff.toLocaleString()} pts (${sign}${Math.round(absPct * 100)}%).`;
+    const why  = `${t.partner} has surplus ${t.recvPos} depth and needs ${t.givePos}. You have the opposite. Net value to you: ${sign}${diff.toLocaleString()} pts.${historyNote}`;
 
     return `<div class="trade-card">
       <div class="trade-hdr">
-        <div class="trade-partner">Trade with ${t.partner}</div>
+        <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;">
+          <div class="trade-partner">Trade with ${t.partner}</div>
+          ${profTag}
+        </div>
         <div class="badge ${cls}">${lbl}</div>
       </div>
       <div class="trade-flow">
