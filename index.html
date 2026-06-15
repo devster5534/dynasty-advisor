@@ -906,11 +906,66 @@ function buildPosTradeFreq(transactions) {
   return freq;
 }
 
-// A position is "rarely traded" if it appears in fewer than 8% of traded players league-wide.
-// Requires at least 10 total player trades to make the call — otherwise assume all positions tradeable.
+// A position is "rarely traded" if it appears in fewer than 10% of traded players,
+// or in fewer than 3 total trades. When history is sparse (< 15 player movements),
+// default QB to rarely traded — it's almost never traded in 1QB leagues.
 function isRarelyTraded(pos) {
-  if (G_posTradeFreq.total < 10) return false;
-  return (G_posTradeFreq[pos] || 0) / G_posTradeFreq.total < 0.08;
+  const count = G_posTradeFreq[pos] || 0;
+  const total = G_posTradeFreq.total || 0;
+  if (total < 15) return pos === 'QB';
+  if (count < 3) return true;
+  return count / total < 0.10;
+}
+
+function generatePlayerBlurb(player, teams, posAvg) {
+  const p   = player.p;
+  const pos = p.position;
+  if (!pos || !['QB','RB','WR','TE'].includes(pos)) return '';
+  const age  = p.age || null;
+  const exp  = typeof p.years_exp === 'number' ? p.years_exp : null;
+  const team = p.team || p.maybeTeam || null;
+
+  // League-wide rank at this position across all rosters
+  const seen = new Set();
+  const allAtPos = [];
+  for (const t of teams) {
+    for (const pl of (t.byPos[pos] || [])) {
+      if (!seen.has(pl.id)) { seen.add(pl.id); allAtPos.push(pl); }
+    }
+  }
+  allAtPos.sort((a, b) => b.v - a.v);
+  const rank  = allAtPos.findIndex(x => x.id === player.id) + 1;
+  const total = allAtPos.length;
+
+  const parts = [];
+
+  if (age) {
+    const primeYrs = Math.max(0, 29 - age);
+    if (age <= 21)      parts.push(`Age ${age} with ${primeYrs}+ prime years ahead — elite dynasty age`);
+    else if (age <= 23) parts.push(`Age ${age}, still ascending with ${primeYrs}+ years before his peak`);
+    else                parts.push(`Age ${age}, in the buy window before his peak production`);
+  }
+
+  if (exp !== null) {
+    if (exp === 0)      parts.push('entering his rookie season — maximum upside, outcome still unknown');
+    else if (exp === 1) parts.push('heading into Year 2, when dynasty value spikes most');
+    else if (exp === 2) parts.push('entering Year 3 — the typical dynasty breakout window');
+    else if (exp <= 4)  parts.push(`${exp + 1} years in, still on the upside of his career`);
+  }
+
+  if (rank > 0 && total > 0) {
+    const pct = rank / total;
+    if (pct <= 0.15)      parts.push(`ranks top-${Math.ceil(pct * 100)}% at ${pos} in this league by dynasty value`);
+    else if (pct <= 0.35) parts.push(`top-third ${pos} across all rosters in this league`);
+    else if (pct <= 0.55) parts.push(`mid-tier ${pos} — value could climb with opportunity or a role change`);
+    else                  parts.push(`upside speculative ${pos} — buy low on potential`);
+  }
+
+  if (team) parts.push(`currently on the ${team}`);
+
+  if (!parts.length) return '';
+  const first = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+  return first + (parts.length > 1 ? '. ' + parts.slice(1).join('. ') + '.' : '.');
 }
 
 function tradeProfileLabel(profile) {
@@ -1460,7 +1515,7 @@ function classifyTrade(t, posAvg) {
   return 'depth';
 }
 
-function renderTradeCard(t, teams, posAvg, traj) {
+function renderTradeCard(t, teams, posAvg, traj, bucket) {
   const giveVal = t.give.reduce((s, x) => s + x.v, 0);
   const recvVal = t.recv.reduce((s, x) => s + x.v, 0);
   const diff    = t.diff;
@@ -1545,6 +1600,10 @@ function renderTradeCard(t, teams, posAvg, traj) {
     </div>
     <div class="trade-why"><strong>Why you accept:</strong> ${finalYouWhy}${alignNote ? ' ' + alignNote : ''}</div>
     <div class="trade-why" style="margin-top:6px;"><strong>Why they accept:</strong> ${finalTheyWhy}</div>
+    ${bucket === 'young' && !t.isPickTrade ? t.recv.filter(x => x.p.age && x.p.age < 26).map(x => {
+      const blurb = generatePlayerBlurb(x, teams, posAvg);
+      return blurb ? `<div class="trade-why" style="margin-top:6px;border-top-color:var(--accent-light);"><strong>${pname(x.p)} scouting note:</strong> ${blurb}</div>` : '';
+    }).join('') : ''}
   </div>`;
 }
 
@@ -1591,9 +1650,23 @@ function renderTrades(trades, traj) {
   }).join('');
 
   const tabPanes = TABS.map(tb => {
-    const list = buckets[tb.key];
+    let list = buckets[tb.key];
+
+    // Young bucket: don't give up young players/picks for slightly better young assets.
+    // Allow it only if received value is 25%+ higher, or it's a pick trade (send vet, get pick).
+    if (tb.key === 'young') {
+      list = list.filter(t => {
+        if (t.isPickTrade) return true;
+        const givingYoung = t.give.some(x => (x.p.age || 99) < 25 || x.isPick);
+        if (!givingYoung) return true;
+        const gv = t.give.reduce((s, x) => s + x.v, 0);
+        const rv = t.recv.reduce((s, x) => s + x.v, 0);
+        return rv >= gv * 1.25; // must get 25%+ more value to justify giving up young assets
+      });
+    }
+
     const content = list.length
-      ? list.map(t => renderTradeCard(t, teams, posAvg, traj)).join('')
+      ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tb.key)).join('')
       : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No trades in this category right now — check the other tabs or refresh data after roster moves settle.</p>`;
     return `<div class="tab-pane${tb.key !== firstKey ? ' hidden' : ''}" id="trade-tab-${tb.key}">
       <p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>
