@@ -1166,6 +1166,21 @@ function findTrades(analysis, traj) {
 
   const myRatio  = pos => positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
   const TRADEABLE = ['QB','RB','WR','TE'].filter(p => !isRarelyTraded(p));
+  const futureSeason = s => parseInt(s) > parseInt(SEASON);
+  const ordinal = n => ['','1st','2nd','3rd','4th','5th'][n] || n+'th';
+  // Cheapest round 3+ pick a team holds — used to balance asset count in multi-player trades
+  const cheapPickFrom = rosterId => (G_teamPicks[rosterId] || [])
+    .filter(pk => futureSeason(pk.season) && pk.round >= 3 && pk.value > 50)
+    .sort((a, b) => a.value - b.value)[0] || null;
+  const makeBalPick = (pk, rosterId, ownerName) => !pk ? null : {
+    id:        `bal|${pk.season}|${pk.round}|${rosterId}`,
+    p:         { position: 'PICK' },
+    v:         pk.value,
+    isPick:    true,
+    pickLabel: `${ordinal(pk.round)}-Round ${pk.season}`,
+    isOwn:     pk.isOwn,
+    origOwner: pk.isOwn ? ownerName : null,
+  };
 
   const proposals = [];
   const seen = new Set();
@@ -1204,23 +1219,27 @@ function findTrades(analysis, traj) {
           }
         }
 
-        // 2:1 — I give 2, receive 1 upgrade
+        // 2:1 — I give 2, receive 1 upgrade + a low pick to maintain asset count
+        const balPick2 = cheapPickFrom(other.rosterId);
+        const balPickObj2 = makeBalPick(balPick2, other.rosterId, other.ownerName);
         for (const r of theyHave.slice(0, 5)) {
           if (r.v < 500) continue;
           if (!hasViableDepthAfterTrade(other, needPos, [r.id], posAvg)) continue;
+          const recvAssets = balPickObj2 ? [r, balPickObj2] : [r];
+          const rv = r.v + (balPickObj2 ? balPickObj2.v : 0);
           for (let i = 0; i < Math.min(myGive.length - 1, 5); i++) {
             for (let j = i + 1; j < Math.min(myGive.length, 6); j++) {
               const g1 = myGive[i], g2 = myGive[j];
               if (!hasViableDepthAfterTrade(myTeam, givePos, [g1.id, g2.id], posAvg)) continue;
               const gv   = g1.v + g2.v;
-              const diff = r.v - gv;
-              const pct  = Math.abs(diff) / Math.max(gv, r.v, 1);
+              const diff = rv - gv;
+              const pct  = Math.abs(diff) / Math.max(gv, rv, 1);
               if (pct <= 0.30) {
                 const key = [g1.id, g2.id, r.id].sort().join('|');
                 if (!seen.has(key)) {
                   seen.add(key);
                   const _id = key;
-                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos, recvPos: needPos, diff, pct, traj, _id });
+                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: recvAssets, givePos, recvPos: needPos, diff, pct, traj, _id });
                 }
               }
             }
@@ -1377,8 +1396,23 @@ function findDumpTrades(analysis) {
 
             for (const recv of theyHave.slice(0, 2)) {
               if (!hasViableDepthAfterTrade(other, needPos, [recv.id], posAvg)) continue;
-              const diff = recv.v - totalGiveVal;
-              const pct  = Math.abs(diff) / Math.max(totalGiveVal, recv.v, 1);
+              // Add their cheapest pick to recv to keep my asset count neutral (player+pick for player+pick)
+              const balPick = (G_teamPicks[other.rosterId] || [])
+                .filter(pk => futureSeason(pk.season) && pk.round >= 3 && pk.value > 50)
+                .sort((a, b) => a.value - b.value)[0] || null;
+              const balPickObj = balPick ? {
+                id:        `dbal|${recv.id}|${balPick.season}|${balPick.round}|${other.rosterId}`,
+                p:         { position: 'PICK' },
+                v:         balPick.value,
+                isPick:    true,
+                pickLabel: `${ordinal(balPick.round)}-Round ${balPick.season}`,
+                isOwn:     balPick.isOwn,
+                origOwner: balPick.isOwn ? other.ownerName : null,
+              } : null;
+              const recvAssets = balPickObj ? [recv, balPickObj] : [recv];
+              const recvTotal  = recv.v + (balPickObj ? balPickObj.v : 0);
+              const diff = recvTotal - totalGiveVal;
+              const pct  = Math.abs(diff) / Math.max(totalGiveVal, recvTotal, 1);
               const key  = `dump|${dumpPlayer.id}|${pick.season}|${pick.round}|${recv.id}|${other.rosterId}`;
               if (!seen.has(key)) {
                 seen.add(key);
@@ -1386,7 +1420,7 @@ function findDumpTrades(analysis) {
                   partner:     other.ownerName,
                   partnerId:   other.rosterId,
                   give:        [dumpPlayer, pickObj],
-                  recv:        [recv],
+                  recv:        recvAssets,
                   givePos:     pos,
                   recvPos:     needPos,
                   diff,
@@ -1659,6 +1693,8 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
   const youAcceptWhy = `You're ${myGivePct}% of league avg at ${t.givePos} (relative strength) and ${myRecvPct}% at ${t.recvPos} (biggest need). Addresses your weakness without gutting a stronger position. Net value: ${sign}${diff.toLocaleString()} pts.`;
 
   let theyAcceptWhy = `${t.partner} is at ${theirRecvPct}% of league avg at ${t.recvPos} — they have depth to spare. In return they fill their ${t.givePos} gap (currently at ${theirGivePct}% of avg).`;
+  const balPickInRecv = t.recv.find(x => x.isPick && !x.isMine);
+  if (balPickInRecv) theyAcceptWhy += ` They include their ${balPickInRecv.pickLabel} to keep the asset count even on your side.`;
   if (profile && profile.count > 0) {
     const theyBuyPos = ['QB','RB','WR','TE'].filter(pos =>
       (profile.playersReceived || []).filter(id => playerInfo(id).position === pos).length >= 2
@@ -1701,9 +1737,10 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
   if (t.isDumpTrade) {
     const dumpPlayer = t.give.find(x => !x.isPick);
     const attachedPick = t.give.find(x => x.isPick);
-    const recvPlayer = t.recv[0];
-    finalYouWhy = `${pname(dumpPlayer.p)} (age ${dumpPlayer.p.age || '?'}) has limited dynasty upside — attaching your ${attachedPick.pickLabel} bridges the value gap to acquire ${pname(recvPlayer.p)} (age ${recvPlayer.p.age || '?'}). You convert an aging asset into younger, longer-term value at ${t.recvPos}.`;
-    finalTheyWhy = `${t.partner} needs ${t.givePos} depth and gets a veteran contributor plus a stashed pick. They give up depth at ${t.recvPos} — a position they can afford to thin. The pick sweetens the return enough to make it worth it.`;
+    const recvPlayer = t.recv.find(x => !x.isPick);
+    const recvPick = t.recv.find(x => x.isPick);
+    finalYouWhy = `${pname(dumpPlayer.p)} (age ${dumpPlayer.p.age || '?'}) has limited dynasty upside — attaching your ${attachedPick.pickLabel} bridges the value gap to acquire ${pname(recvPlayer.p)} (age ${recvPlayer.p.age || '?'})${recvPick ? ' plus their ' + recvPick.pickLabel : ''}. You convert an aging asset into younger value${recvPick ? ' and maintain your roster size' : ''}.`;
+    finalTheyWhy = `${t.partner} needs ${t.givePos} depth and gets a veteran contributor plus a pick to stash. They give up depth at ${t.recvPos}${recvPick ? ' and their ' + recvPick.pickLabel : ''} — a position they can afford to thin. The sweetener makes this worth the move.`;
   }
 
   const safeId = (t._id || '').replace(/[^a-zA-Z0-9_|]/g, '_');
