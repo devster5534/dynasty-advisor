@@ -280,6 +280,8 @@
     .tab-btn.active .tab-count { background: var(--accent); color: #fff; }
     .tab-pane { display: block; }
     .tab-pane.hidden { display: none; }
+    .dismiss-btn { float: right; background: none; border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px; font-size: 11px; color: var(--muted); cursor: pointer; margin-left: 8px; }
+    .dismiss-btn:hover { border-color: var(--muted); color: var(--navy); }
 
     /* ---- Path forward ---- */
     .traj-chip {
@@ -469,6 +471,15 @@ const DP_URL = 'https://raw.githubusercontent.com/dynastyprocess/data/master/fil
 let G_tradeProfiles  = {};
 let G_teamPicks      = {};
 let G_posTradeFreq   = { QB:0, RB:0, WR:0, TE:0, total:0 };
+let G_tradePools     = { depth: [], young: [], vet: [], top: [] };
+let G_tradeCtx       = null; // { teams, posAvg, traj } — kept for dismiss re-render
+
+const TRADE_TABS = [
+  { key: 'depth', label: 'Fill Depth',               desc: 'Address your positional weaknesses with like-for-like swaps.' },
+  { key: 'young', label: 'Gain Young Value / Picks',  desc: 'Trade for players under 25 or future picks — build for the future.' },
+  { key: 'vet',   label: 'Add Vets',                  desc: 'Win-now moves targeting proven, prime-age producers.' },
+  { key: 'top',   label: 'Go for Top Dynasty Assets', desc: 'Aggressive pushes for elite dynasty value.' },
+];
 
 function savedRosterKey(leagueId)  { return 'da_roster_'  + leagueId; }
 function savedLeagueKey()          { return 'da_league_v1'; }
@@ -906,13 +917,19 @@ function buildPosTradeFreq(transactions) {
   return freq;
 }
 
-// A position is "rarely traded" if it appears in fewer than 10% of traded players,
-// or in fewer than 3 total trades. When history is sparse (< 15 player movements),
-// default QB to rarely traded — it's almost never traded in 1QB leagues.
+// QB needs a much higher bar because QBs often appear as low-value throw-ins
+// even in leagues that never trade starting QBs. Require 15%+ frequency AND
+// 5+ instances before treating QB as a trade commodity. For all other positions,
+// 10% frequency + 3 instances suffices. When history is thin, default QB to rare.
 function isRarelyTraded(pos) {
   const count = G_posTradeFreq[pos] || 0;
   const total = G_posTradeFreq.total || 0;
-  if (total < 15) return pos === 'QB';
+  if (pos === 'QB') {
+    if (total < 20) return true;
+    if (count < 5) return true;
+    return count / total < 0.15;
+  }
+  if (total < 15) return false;
   if (count < 3) return true;
   return count / total < 0.10;
 }
@@ -1176,10 +1193,13 @@ function findTrades(analysis, traj) {
             if (!hasViableDepthAfterTrade(other, needPos, [r.id], posAvg)) continue;
             const diff = r.v - g.v;
             const pct  = Math.abs(diff) / Math.max(g.v, r.v, 1);
+            // Skip if the other manager is losing >35% value — they won't accept
+            if (diff > 0 && pct > 0.35) continue;
             const key  = [g.id, r.id].sort().join('|');
             if (!seen.has(key)) {
               seen.add(key);
-              proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos, recvPos: needPos, diff, pct, traj });
+              const _id = key;
+              proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g], recv: [r], givePos, recvPos: needPos, diff, pct, traj, _id });
             }
           }
         }
@@ -1199,7 +1219,8 @@ function findTrades(analysis, traj) {
                 const key = [g1.id, g2.id, r.id].sort().join('|');
                 if (!seen.has(key)) {
                   seen.add(key);
-                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos, recvPos: needPos, diff, pct, traj });
+                  const _id = key;
+                  proposals.push({ partner: other.ownerName, partnerId: other.rosterId, give: [g1, g2], recv: [r], givePos, recvPos: needPos, diff, pct, traj, _id });
                 }
               }
             }
@@ -1252,13 +1273,18 @@ function findPickTrades(analysis) {
         .filter(pk => futureSeason(pk.season) && pk.value > 200)
         .sort((a, b) => b.value - a.value);
 
+      const ordinal = n => ['','1st','2nd','3rd','4th','5th'][n] || n+'th';
       for (const pick of theirPicks.slice(0, 3)) {
+        // Realism: don't suggest a pick worth much more than the player — the other manager won't overpay
+        if (pick.value > player.v * 1.30) continue;
+        // Don't suggest premium picks (R1/R2) for aging players (30+)
+        const playerAge = player.p.age || 0;
+        if (playerAge >= 30 && pick.round <= 2) continue;
         const diff = pick.value - player.v;
         const pct  = Math.abs(diff) / Math.max(pick.value, player.v, 1);
         const key  = `pick|${player.id}|${pick.season}|${pick.round}|${other.rosterId}`;
         if (!seen.has(key)) {
           seen.add(key);
-          const ordinal = n => ['','1st','2nd','3rd','4th','5th'][n] || n+'th';
           const pickObj = {
             id: key,
             p: { position: 'PICK' },
@@ -1279,6 +1305,7 @@ function findPickTrades(analysis) {
             pct,
             isPickTrade: true,
             theirNeedRatio: (theirRatioAtPos * 100).toFixed(0),
+            _id: key,
           });
         }
       }
@@ -1579,13 +1606,17 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
     finalTheyWhy = `${t.partner} is at ${t.theirNeedRatio}% of league avg at ${t.givePos} and needs the upgrade. They're paying with draft capital they can afford, getting a proven player now.`;
   }
 
-  return `<div class="trade-card">
+  const safeId = (t._id || '').replace(/[^a-zA-Z0-9_|]/g, '_');
+  return `<div class="trade-card" id="tc-${safeId}">
     <div class="trade-hdr">
       <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;">
         <div class="trade-partner">Trade with ${t.partner}</div>
         ${profTag}
       </div>
-      <div class="badge ${cls}">${lbl}</div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <div class="badge ${cls}">${lbl}</div>
+        <button class="dismiss-btn" onclick="dismissTrade('${t._id}','${bucket || ''}')">✕</button>
+      </div>
     </div>
     <div class="trade-flow">
       <div>
@@ -1616,6 +1647,47 @@ function switchTradeTab(key) {
   if (pane) pane.classList.remove('hidden');
 }
 
+function applyTabFilter(list, tabKey) {
+  if (tabKey !== 'young') return list;
+  // Young bucket: don't give up young assets for marginally better young assets
+  return list.filter(t => {
+    if (t.isPickTrade) return true;
+    const givingYoung = t.give.some(x => (x.p.age || 99) < 25 || x.isPick);
+    if (!givingYoung) return true;
+    const gv = t.give.reduce((s, x) => s + x.v, 0);
+    const rv = t.recv.reduce((s, x) => s + x.v, 0);
+    return rv >= gv * 1.25;
+  });
+}
+
+function rerenderTabPane(tabKey) {
+  if (!G_tradeCtx) return;
+  const { teams, posAvg, traj } = G_tradeCtx;
+  const tb   = TRADE_TABS.find(t => t.key === tabKey);
+  const pane = document.getElementById('trade-tab-' + tabKey);
+  if (!tb || !pane) return;
+  const pool = G_tradePools[tabKey];
+  const list = applyTabFilter(pool, tabKey);
+  const content = list.length
+    ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tabKey)).join('')
+    : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No more proposals in this category — check the other tabs or refresh data after roster moves settle.</p>`;
+  pane.innerHTML = `<p style="font-size:12px;color:var(--muted);margin:0 0 14px;">${tb.desc}</p>${content}`;
+  // Update tab count badge
+  const btn = document.querySelector(`#tradesContent .tab-btn[data-tab="${tabKey}"]`);
+  if (btn) {
+    const n = applyTabFilter(pool, tabKey).length;
+    let span = btn.querySelector('.tab-count');
+    if (!span && n > 0) { span = document.createElement('span'); span.className = 'tab-count'; btn.appendChild(span); }
+    if (span) span.textContent = n > 0 ? n : '';
+  }
+}
+
+function dismissTrade(tradeId, tabKey) {
+  if (!tradeId || !tabKey || !G_tradePools[tabKey]) return;
+  G_tradePools[tabKey] = G_tradePools[tabKey].filter(t => t._id !== tradeId);
+  rerenderTabPane(tabKey);
+}
+
 function renderTrades(trades, traj) {
   if (!S.hasValues) {
     $('tradesContent').innerHTML = `<p style="color:var(--muted);font-size:14px;">Dynasty values couldn't load — click Refresh Data to try again.</p>`;
@@ -1627,44 +1699,23 @@ function renderTrades(trades, traj) {
   }
 
   const { teams, posAvg } = analyzeAll();
+  G_tradeCtx = { teams, posAvg, traj };
 
-  const TABS = [
-    { key: 'depth', label: 'Fill Depth',               desc: 'Address your positional weaknesses with like-for-like swaps.' },
-    { key: 'young', label: 'Gain Young Value / Picks',  desc: 'Trade for players under 25 — build for the future.' },
-    { key: 'vet',   label: 'Add Vets',                  desc: 'Win-now moves targeting proven, prime-age producers.' },
-    { key: 'top',   label: 'Go for Top Dynasty Assets', desc: 'Aggressive pushes for elite dynasty value.' },
-  ];
+  // Populate global pools (full lists, not capped — dismiss pulls from here)
+  G_tradePools = { depth: [], young: [], vet: [], top: [] };
+  for (const t of trades) G_tradePools[classifyTrade(t, posAvg)].push(t);
 
-  // Bucket trades into categories
-  const buckets = { depth: [], young: [], vet: [], top: [] };
-  for (const t of trades) buckets[classifyTrade(t, posAvg)].push(t);
+  const firstKey = (TRADE_TABS.find(tb => G_tradePools[tb.key].length > 0) || TRADE_TABS[0]).key;
 
-  // Default to first non-empty tab
-  const firstKey = (TABS.find(tb => buckets[tb.key].length > 0) || TABS[0]).key;
-
-  const tabButtons = TABS.map(tb => {
-    const n = buckets[tb.key].length;
+  const tabButtons = TRADE_TABS.map(tb => {
+    const n = applyTabFilter(G_tradePools[tb.key], tb.key).length;
     return `<button class="tab-btn${tb.key === firstKey ? ' active' : ''}" data-tab="${tb.key}" onclick="switchTradeTab('${tb.key}')">
       ${tb.label}${n ? `<span class="tab-count">${n}</span>` : ''}
     </button>`;
   }).join('');
 
-  const tabPanes = TABS.map(tb => {
-    let list = buckets[tb.key];
-
-    // Young bucket: don't give up young players/picks for slightly better young assets.
-    // Allow it only if received value is 25%+ higher, or it's a pick trade (send vet, get pick).
-    if (tb.key === 'young') {
-      list = list.filter(t => {
-        if (t.isPickTrade) return true;
-        const givingYoung = t.give.some(x => (x.p.age || 99) < 25 || x.isPick);
-        if (!givingYoung) return true;
-        const gv = t.give.reduce((s, x) => s + x.v, 0);
-        const rv = t.recv.reduce((s, x) => s + x.v, 0);
-        return rv >= gv * 1.25; // must get 25%+ more value to justify giving up young assets
-      });
-    }
-
+  const tabPanes = TRADE_TABS.map(tb => {
+    const list    = applyTabFilter(G_tradePools[tb.key], tb.key);
     const content = list.length
       ? list.map(t => renderTradeCard(t, teams, posAvg, traj, tb.key)).join('')
       : `<p style="color:var(--muted);font-size:13px;padding:12px 0;">No trades in this category right now — check the other tabs or refresh data after roster moves settle.</p>`;
