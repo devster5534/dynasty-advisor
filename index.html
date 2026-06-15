@@ -1251,14 +1251,16 @@ function findPickTrades(analysis) {
   if (!myTeam) return [];
 
   const TRADEABLE    = ['QB','RB','WR','TE'].filter(p => !isRarelyTraded(p));
+  const isSF = (S.league && (S.league.roster_positions || []).includes('SUPER_FLEX'));
   const futureSeason = s => parseInt(s) > parseInt(SEASON);
   const proposals    = [];
   const seen         = new Set();
 
-  // Players I could sell: any tradeable position, value > 400
-  const sellPool = TRADEABLE.flatMap(pos =>
-    (myTeam.byPos[pos] || []).filter(x => x.v > 400).slice(0, 5).map(x => ({ ...x, givePos: pos }))
-  ).sort((a, b) => b.v - a.v).slice(0, 10);
+  // In SF leagues, QB is the most valuable dynasty asset — never suggest selling a QB for picks
+  const sellPool = TRADEABLE.flatMap(pos => {
+    if (isSF && pos === 'QB') return [];
+    return (myTeam.byPos[pos] || []).filter(x => x.v > 400).slice(0, 5).map(x => ({ ...x, givePos: pos }));
+  }).sort((a, b) => b.v - a.v).slice(0, 10);
 
   for (const player of sellPool) {
     if (!hasViableDepthAfterTrade(myTeam, player.givePos, [player.id], posAvg)) continue;
@@ -1277,6 +1279,8 @@ function findPickTrades(analysis) {
       for (const pick of theirPicks.slice(0, 3)) {
         // Realism: don't suggest a pick worth much more than the player — the other manager won't overpay
         if (pick.value > player.v * 1.30) continue;
+        // Don't suggest giving up a player worth much more than the pick — you'd be underselling
+        if (player.v > pick.value * 1.25) continue;
         // Don't suggest premium picks (R1/R2) for aging players (30+)
         const playerAge = player.p.age || 0;
         if (playerAge >= 30 && pick.round <= 2) continue;
@@ -1313,6 +1317,92 @@ function findPickTrades(analysis) {
   }
 
   return proposals.sort((a, b) => a.pct - b.pct).slice(0, 12);
+}
+
+// Generates proposals where I send an aging player + one of my own picks to get a young player back
+function findDumpTrades(analysis) {
+  const { teams, posAvg, myTeam } = analysis;
+  if (!myTeam) return [];
+
+  const isSF         = (S.league && (S.league.roster_positions || []).includes('SUPER_FLEX'));
+  const futureSeason = s => parseInt(s) > parseInt(SEASON);
+  const ordinal      = n => ['','1st','2nd','3rd','4th','5th'][n] || n+'th';
+  const myRatioAt    = pos => positionTotal(myTeam.byPos[pos] || []) / Math.max(posAvg[pos], 1);
+
+  const proposals = [];
+  const seen      = new Set();
+
+  // Picks I currently hold and could attach to sweeten a deal
+  const myPicks = (G_teamPicks[myTeam.rosterId] || [])
+    .filter(pk => futureSeason(pk.season) && pk.value > 150)
+    .sort((a, b) => b.value - a.value);
+
+  if (!myPicks.length) return [];
+
+  // Dump candidates: players 30+ whose value is below 85% of position average
+  for (const pos of ['RB', 'WR', 'TE', 'QB']) {
+    if (isSF && pos === 'QB') continue;
+    const dumpCandidates = (myTeam.byPos[pos] || [])
+      .filter(x => (x.p.age || 0) >= 30 && x.v < posAvg[pos] * 0.85 && x.v > 200);
+
+    for (const dumpPlayer of dumpCandidates) {
+      for (const pick of myPicks.slice(0, 2)) {
+        const pickObj = {
+          id:        `myp|${dumpPlayer.id}|${pick.season}|${pick.round}`,
+          p:         { position: 'PICK' },
+          v:         pick.value,
+          isPick:    true,
+          isMine:    true,
+          pickLabel: `${ordinal(pick.round)}-Round ${pick.season}`,
+        };
+
+        const totalGiveVal = dumpPlayer.v + pick.value;
+
+        for (const other of teams) {
+          if (other.isMe) continue;
+          const theirRatioAtDump = positionTotal(other.byPos[pos] || []) / Math.max(posAvg[pos], 1);
+          // Only offer aging player to teams that actually need that position
+          if (theirRatioAtDump >= 1.0) continue;
+
+          // Find what I want back: young player (< 28) at a position I need
+          for (const needPos of ['QB', 'RB', 'WR', 'TE']) {
+            if (needPos === pos) continue;
+            if (isSF && needPos === 'QB') continue;
+            if (myRatioAt(needPos) >= 1.0) continue;
+
+            const theyHave = (other.byPos[needPos] || []).filter(x => {
+              const lo = totalGiveVal * 0.55, hi = totalGiveVal * 1.15;
+              return x.v >= lo && x.v <= hi && x.v > 300 && (x.p.age || 99) < 28;
+            });
+
+            for (const recv of theyHave.slice(0, 2)) {
+              if (!hasViableDepthAfterTrade(other, needPos, [recv.id], posAvg)) continue;
+              const diff = recv.v - totalGiveVal;
+              const pct  = Math.abs(diff) / Math.max(totalGiveVal, recv.v, 1);
+              const key  = `dump|${dumpPlayer.id}|${pick.season}|${pick.round}|${recv.id}|${other.rosterId}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                proposals.push({
+                  partner:     other.ownerName,
+                  partnerId:   other.rosterId,
+                  give:        [dumpPlayer, pickObj],
+                  recv:        [recv],
+                  givePos:     pos,
+                  recvPos:     needPos,
+                  diff,
+                  pct,
+                  isDumpTrade: true,
+                  _id:         key,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return proposals.sort((a, b) => a.pct - b.pct).slice(0, 8);
 }
 
 // ---- Trajectory ----
@@ -1409,9 +1499,10 @@ function renderDashboard() {
   const total  = teams.length;
   const grade  = gradeFromRank(rank, total);
   const traj   = trajectory(myTeam, posAvg);
-  const trades     = findTrades(analysis, traj);
-  const pickTrades = findPickTrades(analysis);
-  const allTrades  = [...trades, ...pickTrades];
+  const trades      = findTrades(analysis, traj);
+  const pickTrades  = findPickTrades(analysis);
+  const dumpTrades  = findDumpTrades(analysis);
+  const allTrades   = [...trades, ...pickTrades, ...dumpTrades];
 
   // Overview
   const leagueAvgVal = teams.reduce((s, t) => s + t.totalVal, 0) / total;
@@ -1533,6 +1624,7 @@ function renderDraftPicks() {
 
 function classifyTrade(t, posAvg) {
   if (t.isPickTrade) return 'young';
+  if (t.isDumpTrade) return 'young'; // converting aging asset into younger player
   const recvMaxVal = Math.max(...t.recv.map(x => x.v));
   const recvAvgAge = t.recv.map(x => x.p.age || 26).reduce((s, a) => s + a, 0) / t.recv.length;
   const giveAvgAge = t.give.map(x => x.p.age || 26).reduce((s, a) => s + a, 0) / t.give.length;
@@ -1577,9 +1669,10 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
 
   const playerCard = (x, pos) => {
     if (x.isPick) {
+      const pickMeta = x.isMine ? 'My pick — attached to sweeten' : x.isOwn ? 'Their own' : 'Via trade';
       return `<div class="trade-player">
         <div class="tp-name">${x.pickLabel}</div>
-        <div class="tp-meta">Draft Pick · ${x.isOwn ? 'Their own' : 'Via trade'}</div>
+        <div class="tp-meta">Draft Pick · ${pickMeta}</div>
         <div class="tp-val">~${x.v.toLocaleString()} pts est.</div>
       </div>`;
     }
@@ -1596,7 +1689,7 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
   const recvSide  = t.recv.map(x => playerCard(x, t.recvPos)).join('');
   const alignNote = tradeAlignmentNote(t, traj);
 
-  // Override reasoning for pick trades
+  // Override reasoning for pick trades and dump trades
   let finalYouWhy = youAcceptWhy;
   let finalTheyWhy = theyAcceptWhy;
   if (t.isPickTrade) {
@@ -1604,6 +1697,13 @@ function renderTradeCard(t, teams, posAvg, traj, bucket) {
     const pick = t.recv[0];
     finalYouWhy = `Converting ${pname(givePlayer.p)} (${givePlayer.v.toLocaleString()} pts) into a future pick is a rebuild move — you bank an asset that could become anything, and free up a roster spot. Net value: ${diff >= 0 ? '+' : ''}${diff.toLocaleString()} pts.`;
     finalTheyWhy = `${t.partner} is at ${t.theirNeedRatio}% of league avg at ${t.givePos} and needs the upgrade. They're paying with draft capital they can afford, getting a proven player now.`;
+  }
+  if (t.isDumpTrade) {
+    const dumpPlayer = t.give.find(x => !x.isPick);
+    const attachedPick = t.give.find(x => x.isPick);
+    const recvPlayer = t.recv[0];
+    finalYouWhy = `${pname(dumpPlayer.p)} (age ${dumpPlayer.p.age || '?'}) has limited dynasty upside — attaching your ${attachedPick.pickLabel} bridges the value gap to acquire ${pname(recvPlayer.p)} (age ${recvPlayer.p.age || '?'}). You convert an aging asset into younger, longer-term value at ${t.recvPos}.`;
+    finalTheyWhy = `${t.partner} needs ${t.givePos} depth and gets a veteran contributor plus a stashed pick. They give up depth at ${t.recvPos} — a position they can afford to thin. The pick sweetens the return enough to make it worth it.`;
   }
 
   const safeId = (t._id || '').replace(/[^a-zA-Z0-9_|]/g, '_');
@@ -1652,6 +1752,7 @@ function applyTabFilter(list, tabKey) {
   // Young bucket: don't give up young assets for marginally better young assets
   return list.filter(t => {
     if (t.isPickTrade) return true;
+    if (t.isDumpTrade) return true; // dump trades always valid — giving aging vet + pick for youth
     const givingYoung = t.give.some(x => (x.p.age || 99) < 25 || x.isPick);
     if (!givingYoung) return true;
     const gv = t.give.reduce((s, x) => s + x.v, 0);
