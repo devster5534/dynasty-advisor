@@ -450,6 +450,7 @@
 
     <div style="text-align:center;margin-top:8px;">
       <button class="btn btn-sm" onclick="clearCacheAndReload()">Refresh Data</button>
+      <button class="btn btn-sm" onclick="resetDismissed()" style="margin-left:8px;">Reset Proposals</button>
       <span style="font-size:11px;color:var(--muted);margin-left:10px;">Values cached 1 hr · Player DB cached 24 hr</span>
     </div>
 
@@ -2036,6 +2037,21 @@ function clearCacheAndReload() {
   localStorage.removeItem(CACHE.values.key);
   localStorage.removeItem(CACHE.players.key);
   location.reload();
+}
+
+function resetDismissed() {
+  try { localStorage.removeItem(dismissedKey()); } catch {}
+  G_dismissed = new Set();
+  if (G_tradeCtx) {
+    // Re-populate pools from scratch so dismissed proposals come back
+    const { teams, posAvg, traj } = G_tradeCtx;
+    const analysis = analyzeAll();
+    const trades    = findTrades(analysis, traj);
+    const pickTrades = findPickTrades(analysis);
+    const dumpTrades = findDumpTrades(analysis);
+    const allTrades  = [...trades, ...pickTrades, ...dumpTrades];
+    renderTrades(allTrades, traj);
+  }
 }
 
 // ---- Boot ----
